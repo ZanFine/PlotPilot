@@ -1,5 +1,5 @@
 <template>
-  <ChartWrapper :option="chartOption" :height="height" />
+  <ChartWrapper :option="chartOption" :height="height" :aria-label="`进度图表 - ${completed} 完成，共 ${total}`" />
 </template>
 
 <script setup lang="ts">

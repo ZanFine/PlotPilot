@@ -1,5 +1,5 @@
 <template>
-  <ChartWrapper :option="chartOption" :height="height" />
+  <ChartWrapper :option="chartOption" :height="height" :aria-label="`${title} - 分布图表`" />
 </template>
 
 <script setup lang="ts">

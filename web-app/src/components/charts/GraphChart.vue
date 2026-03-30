@@ -1,5 +1,5 @@
 <template>
-  <ChartWrapper :option="chartOption" :height="height" @click="handleNodeClick" />
+  <ChartWrapper :option="chartOption" :height="height" :aria-label="`关系图表 - ${nodes.length} 个节点，${links.length} 个连接`" @click="handleNodeClick" />
 </template>
 
 <script setup lang="ts">

@@ -1,5 +1,10 @@
 <template>
-  <div class="chart-wrapper" :style="{ height: height }">
+  <div
+    class="chart-wrapper"
+    :style="{ height: height }"
+    role="img"
+    :aria-label="ariaLabel"
+  >
     <v-chart
       :option="option"
       :autoresize="true"
@@ -18,9 +23,11 @@ const props = withDefaults(defineProps<{
   option: EChartsOption
   height?: string
   theme?: string
+  ariaLabel?: string
 }>(), {
   height: '400px',
-  theme: 'light'
+  theme: 'light',
+  ariaLabel: 'Chart visualization'
 })
 
 const emit = defineEmits<{
