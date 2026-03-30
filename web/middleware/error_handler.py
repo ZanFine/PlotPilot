@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from aitext.web.models.responses import ErrorResponse
+from web.models.responses import ErrorResponse
 
 logger = logging.getLogger("aitext.web.middleware.error_handler")
 
