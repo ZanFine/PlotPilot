@@ -25,3 +25,11 @@ class WordCount:
 
     def __ge__(self, other: 'WordCount') -> bool:
         return self.value >= other.value
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, WordCount):
+            return False
+        return self.value == other.value
+
+    def __str__(self) -> str:
+        return f"{self.value}"
