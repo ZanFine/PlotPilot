@@ -4,6 +4,7 @@ from application.services.indexing_service import IndexingService
 from application.services.character_indexer import CharacterIndexer
 from application.services.state_extractor import StateExtractor
 from application.services.state_updater import StateUpdater
+from application.services.context_builder import ContextBuilder
 
 __all__ = [
     "NovelService",
@@ -11,4 +12,5 @@ __all__ = [
     "CharacterIndexer",
     "StateExtractor",
     "StateUpdater",
+    "ContextBuilder",
 ]
