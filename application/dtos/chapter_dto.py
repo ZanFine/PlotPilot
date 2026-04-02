@@ -27,12 +27,16 @@ class ChapterDTO:
         Returns:
             ChapterDTO
         """
+        # 处理 novel_id 和 status 可能是字符串或值对象的情况
+        novel_id = chapter.novel_id.value if hasattr(chapter.novel_id, 'value') else chapter.novel_id
+        status = chapter.status.value if hasattr(chapter.status, 'value') else chapter.status
+
         return cls(
             id=chapter.id,
-            novel_id=chapter.novel_id.value,
+            novel_id=novel_id,
             number=chapter.number,
             title=chapter.title,
             content=chapter.content,
             word_count=chapter.word_count.value,
-            status=chapter.status.value
+            status=status
         )

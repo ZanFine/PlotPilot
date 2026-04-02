@@ -10,6 +10,10 @@ from typing import Optional
 
 from application.paths import DATA_DIR
 from infrastructure.persistence.storage.file_storage import FileStorage
+from infrastructure.persistence.database.connection import get_database
+from infrastructure.persistence.database.sqlite_novel_repository import SqliteNovelRepository
+from infrastructure.persistence.database.sqlite_chapter_repository import SqliteChapterRepository
+from infrastructure.persistence.database.sqlite_knowledge_repository import SqliteKnowledgeRepository
 from infrastructure.persistence.repositories.file_novel_repository import FileNovelRepository
 from infrastructure.persistence.repositories.file_chapter_repository import FileChapterRepository
 from infrastructure.persistence.repositories.file_bible_repository import FileBibleRepository
@@ -87,22 +91,22 @@ def get_storage() -> FileStorage:
 
 
 # Repository 依赖
-def get_novel_repository() -> FileNovelRepository:
-    """获取 Novel 仓储
+def get_novel_repository() -> SqliteNovelRepository:
+    """获取 Novel 仓储（SQLite）
 
     Returns:
-        FileNovelRepository 实例
+        SqliteNovelRepository 实例
     """
-    return FileNovelRepository(get_storage())
+    return SqliteNovelRepository(get_database())
 
 
-def get_chapter_repository() -> FileChapterRepository:
-    """获取 Chapter 仓储
+def get_chapter_repository() -> SqliteChapterRepository:
+    """获取 Chapter 仓储（SQLite）
 
     Returns:
-        FileChapterRepository 实例
+        SqliteChapterRepository 实例
     """
-    return FileChapterRepository(get_storage())
+    return SqliteChapterRepository(get_database())
 
 
 def get_bible_repository() -> FileBibleRepository:
@@ -123,13 +127,13 @@ def get_cast_repository() -> FileCastRepository:
     return FileCastRepository(get_storage())
 
 
-def get_knowledge_repository() -> FileKnowledgeRepository:
-    """获取 Knowledge 仓储
+def get_knowledge_repository() -> SqliteKnowledgeRepository:
+    """获取 Knowledge 仓储（SQLite）
 
     Returns:
-        FileKnowledgeRepository 实例
+        SqliteKnowledgeRepository 实例
     """
-    return FileKnowledgeRepository(get_storage())
+    return SqliteKnowledgeRepository(get_database())
 
 
 def get_chat_repository() -> FileChatRepository:

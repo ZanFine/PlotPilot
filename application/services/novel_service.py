@@ -77,9 +77,9 @@ class NovelService:
 
         dto = NovelDTO.from_domain(novel)
 
-        # Check for metadata files
-        dto.has_bible = self.novel_repository.storage.exists(f"novels/{novel_id}/bible.json")
-        dto.has_outline = self.novel_repository.storage.exists(f"novels/{novel_id}/outline.json")
+        # TODO: Implement bible and outline checks for SQLite
+        dto.has_bible = False
+        dto.has_outline = False
 
         return dto
 
