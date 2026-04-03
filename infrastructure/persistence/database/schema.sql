@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS triples (
     object TEXT NOT NULL,
     chapter_id TEXT,
     note TEXT,
+    entity_type TEXT,  -- 'character' | 'location' | NULL (通用)
+    importance TEXT,  -- 人物: 'primary'|'secondary'|'minor', 地点: 'core'|'important'|'normal'
+    location_type TEXT,  -- 地点类型: 'city'|'region'|'building'|'faction'|'realm'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
@@ -153,6 +156,8 @@ CREATE INDEX IF NOT EXISTS idx_characters_name ON characters(novel_id, name);
 CREATE INDEX IF NOT EXISTS idx_triples_novel_id ON triples(novel_id);
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(novel_id, subject);
 CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
+CREATE INDEX IF NOT EXISTS idx_triples_entity_type ON triples(novel_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_triples_importance ON triples(importance);
 CREATE INDEX IF NOT EXISTS idx_events_novel_id ON events(novel_id);
 CREATE INDEX IF NOT EXISTS idx_events_chapter ON events(novel_id, chapter_number);
 CREATE INDEX IF NOT EXISTS idx_locations_bible_id ON locations(bible_id);

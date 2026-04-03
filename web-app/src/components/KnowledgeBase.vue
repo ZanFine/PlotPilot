@@ -73,6 +73,34 @@
                 />
                 <n-input v-model:value="f.note" placeholder="备注" size="small" class="kb-fact-note" />
               </div>
+              <div class="kb-fact-meta">
+                <n-select
+                  v-model:value="f.entity_type"
+                  :options="entityTypeOptions"
+                  placeholder="实体类型"
+                  size="small"
+                  clearable
+                  class="kb-fact-select"
+                />
+                <n-select
+                  v-model:value="f.importance"
+                  :options="getImportanceOptions(f.entity_type)"
+                  placeholder="重要程度"
+                  size="small"
+                  clearable
+                  class="kb-fact-select"
+                  :disabled="!f.entity_type"
+                />
+                <n-select
+                  v-if="f.entity_type === 'location'"
+                  v-model:value="f.location_type"
+                  :options="locationTypeOptions"
+                  placeholder="地点类型"
+                  size="small"
+                  clearable
+                  class="kb-fact-select"
+                />
+              </div>
               <n-button size="tiny" quaternary type="error" @click="removeFact(fi)">删除</n-button>
             </div>
           </div>
@@ -100,6 +128,40 @@ interface Fact {
   object: string
   chapter_id?: number | null
   note?: string
+  entity_type?: 'character' | 'location' | null
+  importance?: string | null
+  location_type?: string | null
+}
+
+const entityTypeOptions = [
+  { label: '人物', value: 'character' },
+  { label: '地点', value: 'location' },
+]
+
+const characterImportanceOptions = [
+  { label: '主角', value: 'primary' },
+  { label: '重要配角', value: 'secondary' },
+  { label: '次要人物', value: 'minor' },
+]
+
+const locationImportanceOptions = [
+  { label: '核心地点', value: 'core' },
+  { label: '重要地点', value: 'important' },
+  { label: '一般地点', value: 'normal' },
+]
+
+const locationTypeOptions = [
+  { label: '城市', value: 'city' },
+  { label: '区域', value: 'region' },
+  { label: '建筑', value: 'building' },
+  { label: '势力', value: 'faction' },
+  { label: '领域', value: 'realm' },
+]
+
+const getImportanceOptions = (entityType?: string | null) => {
+  if (entityType === 'character') return characterImportanceOptions
+  if (entityType === 'location') return locationImportanceOptions
+  return []
 }
 
 const viewMode = ref<'graph' | 'json' | 'editor'>('graph')
@@ -199,6 +261,9 @@ const addFact = () => {
     object: '',
     chapter_id: null,
     note: '',
+    entity_type: null,
+    importance: null,
+    location_type: null,
   })
 }
 
@@ -348,8 +413,8 @@ onMounted(() => {
 
 .kb-fact {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px;
   background: #f9fafb;
   border-radius: 8px;
@@ -360,15 +425,23 @@ onMounted(() => {
   font-size: 11px;
   color: #9ca3af;
   font-family: monospace;
-  min-width: 120px;
-  padding-top: 6px;
 }
 
 .kb-fact-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr 100px 1.5fr;
   gap: 8px;
+}
+
+.kb-fact-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.kb-fact-select {
   flex: 1;
+  min-width: 120px;
 }
 
 .kb-fact-ch {

@@ -21,7 +21,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { castApi } from '../api/cast'
+import { knowledgeApi } from '../api/knowledge'
 import GraphChart from './charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge } from '../utils/visToEcharts'
 import type { EChartsNode, EChartsLink } from '../utils/visToEcharts'
@@ -29,44 +29,83 @@ import type { EChartsNode, EChartsLink } from '../utils/visToEcharts'
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
 
-interface CastCharacter {
+interface KnowledgeTriple {
   id: string
-  name: string
-  aliases: string[]
-  role: string
-  traits: string
-  note: string
-  story_events?: unknown[]
-}
-
-interface CastRelationship {
-  id: string
-  source_id: string
-  target_id: string
-  label: string
-  note: string
-  directed: boolean
-  story_events?: unknown[]
+  subject: string
+  predicate: string
+  object: string
+  chapter_id?: number
+  note?: string
+  entity_type?: string
+  importance?: string
+  location_type?: string
 }
 
 const loading = ref(false)
-const graph = ref<{ characters: CastCharacter[]; relationships: CastRelationship[] }>({
-  characters: [],
-  relationships: [],
-})
+const triples = ref<KnowledgeTriple[]>([])
 let requestId = 0
+
+// 从三元组中提取人物节点和关系
+const graph = computed(() => {
+  const characterTriples = triples.value.filter(t => t.entity_type === 'character')
+
+  // 提取所有人物节点（从 subject 和 object 中）
+  const characterMap = new Map<string, { name: string; importance?: string; note?: string }>()
+
+  characterTriples.forEach(t => {
+    if (!characterMap.has(t.subject)) {
+      characterMap.set(t.subject, { name: t.subject, importance: t.importance, note: t.note })
+    }
+    if (!characterMap.has(t.object)) {
+      characterMap.set(t.object, { name: t.object })
+    }
+  })
+
+  const characters = Array.from(characterMap.entries()).map(([id, data]) => ({
+    id,
+    name: data.name,
+    importance: data.importance,
+    note: data.note || '',
+  }))
+
+  const relationships = characterTriples.map(t => ({
+    id: t.id,
+    source_id: t.subject,
+    target_id: t.object,
+    label: t.predicate,
+    note: t.note || '',
+  }))
+
+  return { characters, relationships }
+})
 
 const emptyHint = computed(() => graph.value.characters.length === 0 && !loading.value)
 
+// 根据重要程度返回颜色
+const getNodeColor = (importance?: string) => {
+  switch (importance) {
+    case 'primary':
+      return { background: '#fecaca', border: '#ef4444' } // 主角-红色
+    case 'secondary':
+      return { background: '#fed7aa', border: '#f97316' } // 重要配角-橙色
+    case 'minor':
+      return { background: '#bfdbfe', border: '#3b82f6' } // 次要人物-蓝色
+    default:
+      return { background: '#e5e7eb', border: '#6b7280' } // 未分类-灰色
+  }
+}
+
 const graphData = computed(() => {
   const visNodes: VisNode[] = graph.value.characters.map(c => {
-    const ne = (c.story_events || []).length
-    const base = [c.name, ...(c.aliases || []), c.traits, c.note].filter(Boolean).join('\n')
+    const importanceLabel = c.importance === 'primary' ? '主角' :
+                           c.importance === 'secondary' ? '重要配角' :
+                           c.importance === 'minor' ? '次要人物' : ''
+
     return {
       id: c.id,
-      label: c.name + (c.role ? `\n${c.role}` : '') + (ne ? `\n·${ne}事件` : ''),
-      title: ne ? `${base}\n—\n人物线事件 ${ne} 条` : base,
-      color: { background: '#c7d2fe', border: '#6366f1' },
+      label: c.name + (importanceLabel ? `\n[${importanceLabel}]` : ''),
+      title: [c.name, importanceLabel, c.note].filter(Boolean).join('\n'),
+      color: getNodeColor(c.importance),
       font: { size: 14 },
       shape: 'box',
       borderWidth: 2,
@@ -74,15 +113,13 @@ const graphData = computed(() => {
   })
 
   const visEdges: VisEdge[] = graph.value.relationships.map(r => {
-    const ne = (r.story_events || []).length
-    const base = [r.label, r.note].filter(Boolean).join('\n')
     return {
       id: r.id,
       from: r.source_id,
       to: r.target_id,
-      label: (r.label || '') + (ne ? ` ·${ne}` : ''),
-      title: ne ? `${base || '关系'}\n—\n共同经历 ${ne} 条` : base || undefined,
-      arrows: r.directed ? 'to' : undefined,
+      label: r.label,
+      title: [r.label, r.note].filter(Boolean).join('\n') || undefined,
+      arrows: 'to',
       font: { size: 11, align: 'middle' },
     }
   })
@@ -98,17 +135,14 @@ const reload = async () => {
 
   loading.value = true
   try {
-    const data = await castApi.getCast(props.slug)
+    const data = await knowledgeApi.getKnowledge(props.slug)
 
     // Only update if this is still the latest request
     if (currentRequestId === requestId) {
-      graph.value = {
-        characters: data.characters || [],
-        relationships: data.relationships || [],
-      }
+      triples.value = data.facts || []
     }
   } catch (error) {
-    console.error('Failed to load cast data:', error)
+    console.error('Failed to load knowledge data:', error)
     if (currentRequestId === requestId) {
       window.$message?.error('加载人物关系失败，请稍后重试')
     }

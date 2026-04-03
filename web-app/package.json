@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@types/dompurify": "^3.0.5",
+    "@vicons/ionicons5": "^0.13.0",
     "@vueuse/core": "^14.2.1",
     "axios": "^1.14.0",
     "dayjs": "^1.11.20",

@@ -210,7 +210,34 @@
       </n-tab-pane>
     </n-tabs>
 
-    <CastGraphCompact v-if="sideTab === 'graph'" :slug="slug" class="kp-graph-embed" />
+    <div v-if="sideTab === 'graph'" class="kp-graph-container">
+      <div class="kp-graph-nav">
+        <n-space :size="8">
+          <n-button
+            size="small"
+            :type="graphFilter === 'character' ? 'primary' : 'default'"
+            @click="graphFilter = 'character'"
+          >
+            <template #icon>
+              <n-icon><PeopleOutline /></n-icon>
+            </template>
+            人物关系图
+          </n-button>
+          <n-button
+            size="small"
+            :type="graphFilter === 'location' ? 'primary' : 'default'"
+            @click="graphFilter = 'location'"
+          >
+            <template #icon>
+              <n-icon><LocationOutline /></n-icon>
+            </template>
+            地点关系图
+          </n-button>
+        </n-space>
+      </div>
+      <CastGraphCompact v-if="graphFilter === 'character'" :slug="slug" class="kp-graph-embed" />
+      <LocationGraphCompact v-if="graphFilter === 'location'" :slug="slug" class="kp-graph-embed" />
+    </div>
     <KnowledgeBase v-if="sideTab === 'knowledge'" :slug="slug" class="kp-graph-embed" />
   </div>
 </template>
@@ -219,15 +246,20 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
+import { PeopleOutline, LocationOutline } from '@vicons/ionicons5'
 import { chapterApi } from '../api/chapter'
 import { knowledgeApi } from '../api/knowledge'
 import CastGraphCompact from './CastGraphCompact.vue'
+import LocationGraphCompact from './LocationGraphCompact.vue'
 import KnowledgeBase from './KnowledgeBase.vue'
 
 
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
 const message = useMessage()
+
+// 关系图过滤器：切换人物/地点
+const graphFilter = ref<'character' | 'location'>('character')
 
 interface Ch {
   chapter_id: number
@@ -658,5 +690,18 @@ onMounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.kp-graph-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.kp-graph-nav {
+  padding: 12px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(248, 250, 252, 0.5);
 }
 </style>

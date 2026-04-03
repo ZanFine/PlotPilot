@@ -75,7 +75,10 @@ class KnowledgeService:
                 predicate=fact.get("predicate", ""),
                 object=fact.get("object", ""),
                 chapter_id=fact.get("chapter_id"),
-                note=fact.get("note", "")
+                note=fact.get("note", ""),
+                entity_type=fact.get("entity_type"),
+                importance=fact.get("importance"),
+                location_type=fact.get("location_type")
             )
             for fact in data.get("facts", [])
         ]
@@ -89,7 +92,9 @@ class KnowledgeService:
             facts=facts
         )
 
-        self.knowledge_repository.save(knowledge)
+        # 使用 save_all 方法保存
+        logger.info(f"KnowledgeService: Calling save_all for {novel_id}, facts: {len(facts)}")
+        self.knowledge_repository.save_all(novel_id, data)
         logger.info(f"Updated knowledge for {novel_id}: {len(chapters)} chapters, {len(facts)} facts")
         return knowledge
 

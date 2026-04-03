@@ -49,7 +49,8 @@ class SqliteKnowledgeRepository:
 
         # 获取三元组
         triples_sql = """
-            SELECT id, subject, predicate, object, chapter_id, note
+            SELECT id, subject, predicate, object, chapter_id, note,
+                   entity_type, importance, location_type
             FROM triples
             WHERE novel_id = ?
             ORDER BY created_at ASC
@@ -73,7 +74,10 @@ class SqliteKnowledgeRepository:
                 predicate=row['predicate'],
                 object=row['object'],
                 chapter_id=row['chapter_id'],
-                note=row['note'] or ""
+                note=row['note'] or "",
+                entity_type=row.get('entity_type'),
+                importance=row.get('importance'),
+                location_type=row.get('location_type')
             )
             for row in triples_rows
         ]
@@ -102,14 +106,18 @@ class SqliteKnowledgeRepository:
     def save_triple(self, novel_id: str, triple: dict) -> None:
         """保存单个三元组"""
         sql = """
-            INSERT INTO triples (id, novel_id, subject, predicate, object, chapter_id, note, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO triples (id, novel_id, subject, predicate, object, chapter_id, note,
+                                entity_type, importance, location_type, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 subject = excluded.subject,
                 predicate = excluded.predicate,
                 object = excluded.object,
                 chapter_id = excluded.chapter_id,
                 note = excluded.note,
+                entity_type = excluded.entity_type,
+                importance = excluded.importance,
+                location_type = excluded.location_type,
                 updated_at = excluded.updated_at
         """
         now = datetime.utcnow().isoformat()
@@ -121,6 +129,9 @@ class SqliteKnowledgeRepository:
             triple['object'],
             triple.get('chapter_id'),
             triple.get('note', ''),
+            triple.get('entity_type'),
+            triple.get('importance'),
+            triple.get('location_type'),
             now,
             now
         ))
@@ -135,7 +146,8 @@ class SqliteKnowledgeRepository:
     def list_triples_by_subject(self, novel_id: str, subject: str) -> List[dict]:
         """查询指定主体的所有三元组"""
         sql = """
-            SELECT id, subject, predicate, object, chapter_id, note
+            SELECT id, subject, predicate, object, chapter_id, note,
+                   entity_type, importance, location_type
             FROM triples
             WHERE novel_id = ? AND subject = ?
             ORDER BY created_at ASC
@@ -145,12 +157,24 @@ class SqliteKnowledgeRepository:
     def list_triples_by_predicate(self, novel_id: str, predicate: str) -> List[dict]:
         """查询指定谓词的所有三元组"""
         sql = """
-            SELECT id, subject, predicate, object, chapter_id, note
+            SELECT id, subject, predicate, object, chapter_id, note,
+                   entity_type, importance, location_type
             FROM triples
             WHERE novel_id = ? AND predicate = ?
             ORDER BY created_at ASC
         """
         return self.db.fetch_all(sql, (novel_id, predicate))
+
+    def list_triples_by_entity_type(self, novel_id: str, entity_type: str) -> List[dict]:
+        """查询指定实体类型的所有三元组"""
+        sql = """
+            SELECT id, subject, predicate, object, chapter_id, note,
+                   entity_type, importance, location_type
+            FROM triples
+            WHERE novel_id = ? AND entity_type = ?
+            ORDER BY created_at ASC
+        """
+        return self.db.fetch_all(sql, (novel_id, entity_type))
 
     def save_chapter_summary(self, knowledge_id: str, chapter_number: int, summary: str) -> None:
         """保存章节摘要"""
@@ -166,11 +190,15 @@ class SqliteKnowledgeRepository:
         self.db.execute(sql, (summary_id, knowledge_id, chapter_number, summary, now, now))
         self.db.get_connection().commit()
 
-    def save_all(self, novel_id: str, data: dict) -> None:
-        """保存完整的知识库数据（用于批量更新）"""
+    def save(self, knowledge: 'StoryKnowledge') -> None:
+        """保存 StoryKnowledge 对象到数据库"""
+        from domain.knowledge.story_knowledge import StoryKnowledge
+
+        novel_id = knowledge.novel_id
+
         with self.db.transaction() as conn:
             # 1. 保存基础信息
-            self.save_knowledge(novel_id, data.get('premise_lock', ''))
+            self.save_knowledge(novel_id, knowledge.premise_lock)
 
             knowledge_id = f"{novel_id}-knowledge"
 
@@ -178,18 +206,101 @@ class SqliteKnowledgeRepository:
             conn.execute("DELETE FROM triples WHERE novel_id = ?", (novel_id,))
 
             # 3. 保存新的三元组
-            for triple in data.get('facts', []):
-                self.save_triple(novel_id, triple)
+            for fact in knowledge.facts:
+                triple_dict = {
+                    'id': fact.id,
+                    'subject': fact.subject,
+                    'predicate': fact.predicate,
+                    'object': fact.object,
+                    'chapter_id': fact.chapter_id,
+                    'note': fact.note,
+                    'entity_type': getattr(fact, 'entity_type', None),
+                    'importance': getattr(fact, 'importance', None),
+                    'location_type': getattr(fact, 'location_type', None)
+                }
+                self.save_triple(novel_id, triple_dict)
 
             # 4. 删除旧的章节摘要
             conn.execute("DELETE FROM chapter_summaries WHERE knowledge_id = ?", (knowledge_id,))
 
             # 5. 保存新的章节摘要
-            for chapter in data.get('chapters', []):
+            for chapter in knowledge.chapters:
                 self.save_chapter_summary(
                     knowledge_id,
-                    chapter['number'],
-                    chapter.get('summary', '')
+                    chapter.chapter_number,
+                    chapter.summary
                 )
+
+        logger.info(f"Saved StoryKnowledge for novel: {novel_id}")
+
+    def save_all(self, novel_id: str, data: dict) -> None:
+        """保存完整的知识库数据（用于批量更新）"""
+        logger.info(f"save_all called for {novel_id}, facts count: {len(data.get('facts', []))}")
+        with self.db.transaction() as conn:
+            # 1. 保存基础信息
+            knowledge_id = f"{novel_id}-knowledge"
+            now = datetime.utcnow().isoformat()
+            logger.info(f"Saving knowledge base info, premise_lock: {data.get('premise_lock', '')[:50]}")
+
+            conn.execute("""
+                INSERT INTO knowledge (id, novel_id, version, premise_lock, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    premise_lock = excluded.premise_lock,
+                    updated_at = excluded.updated_at
+            """, (knowledge_id, novel_id, 1, data.get('premise_lock', ''), now, now))
+
+            # 2. 删除旧的三元组
+            logger.info(f"Deleting old triples for {novel_id}")
+            conn.execute("DELETE FROM triples WHERE novel_id = ?", (novel_id,))
+
+            # 3. 保存新的三元组（直接执行 SQL，不调用 save_triple 避免嵌套提交）
+            logger.info(f"Saving {len(data.get('facts', []))} new triples")
+            for triple in data.get('facts', []):
+                logger.info(f"Inserting triple: {triple['id']} - {triple['subject']}")
+                conn.execute("""
+                    INSERT INTO triples (id, novel_id, subject, predicate, object, chapter_id, note,
+                                        created_at, updated_at, entity_type, importance, location_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        subject = excluded.subject,
+                        predicate = excluded.predicate,
+                        object = excluded.object,
+                        chapter_id = excluded.chapter_id,
+                        note = excluded.note,
+                        entity_type = excluded.entity_type,
+                        importance = excluded.importance,
+                        location_type = excluded.location_type,
+                        updated_at = excluded.updated_at
+                """, (
+                    triple['id'],
+                    novel_id,
+                    triple['subject'],
+                    triple['predicate'],
+                    triple['object'],
+                    triple.get('chapter_id'),
+                    triple.get('note', ''),
+                    now,
+                    now,
+                    triple.get('entity_type'),
+                    triple.get('importance'),
+                    triple.get('location_type')
+                ))
+
+            # 4. 删除旧的章节摘要
+            conn.execute("DELETE FROM chapter_summaries WHERE knowledge_id = ?", (knowledge_id,))
+
+            # 5. 保存新的章节摘要（直接执行 SQL）
+            for chapter in data.get('chapters', []):
+                chapter_number = chapter.get('number') or chapter.get('chapter_id')
+                summary_id = f"{knowledge_id}-ch{chapter_number}"
+                conn.execute("""
+                    INSERT INTO chapter_summaries (id, knowledge_id, chapter_number, summary, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(knowledge_id, chapter_number) DO UPDATE SET
+                        summary = excluded.summary,
+                        updated_at = excluded.updated_at
+                """, (summary_id, knowledge_id, chapter_number, chapter.get('summary', ''), now, now))
+
 
         logger.info(f"Saved complete knowledge for novel: {novel_id}")

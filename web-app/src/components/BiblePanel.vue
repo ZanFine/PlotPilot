@@ -16,27 +16,25 @@
           </div>
           <div class="bible-role-item bible-role-here">
             <span class="bible-role-k">本书设定</span>
-            <span class="bible-role-v">此处 · 文风、人物卡、地点轴</span>
+            <span class="bible-role-v">此处 · 文风、时间线</span>
           </div>
           <div class="bible-role-item">
             <span class="bible-role-k">章级编务</span>
             <span class="bible-role-v">叙事侧栏 · 节拍与摘要</span>
           </div>
           <div class="bible-role-item">
-            <span class="bible-role-k">人物关系</span>
-            <span class="bible-role-v">关系图页 · 节点与边</span>
+            <span class="bible-role-k">人物与地点</span>
+            <span class="bible-role-v">叙事与知识 · 三元组关系图</span>
           </div>
         </div>
         <div class="bible-stats" aria-live="polite">
-          <span class="bible-stat"><em>{{ stats.namedChars }}</em> 人物</span>
-          <span class="bible-stat-dot" />
-          <span class="bible-stat"><em>{{ stats.namedLocs }}</em> 地点/势力</span>
-          <span class="bible-stat-dot" />
           <span class="bible-stat"><em>{{ stats.timelineItems }}</em> 时间线</span>
           <span class="bible-stat-dot" />
           <span class="bible-stat bible-stat-style" :class="{ 'is-done': stats.styleOk }">
             文风公约 {{ stats.styleOk ? '已填' : '待补充' }}
           </span>
+          <span class="bible-stat-dot" />
+          <span class="bible-stat-hint">人物与地点请至「叙事与知识」维护</span>
         </div>
       </div>
       <n-space class="bible-hero-actions" :size="8" align="center">
@@ -48,8 +46,8 @@
     </header>
 
     <n-tabs v-model:value="mainTab" type="line" size="medium" animated class="bible-tabs">
-      <!-- 文风公约 Tab -->
-      <n-tab-pane name="style" tab="文风公约">
+      <!-- 文风设定 Tab -->
+      <n-tab-pane name="style" tab="文风设定">
         <n-scrollbar class="bible-scroll">
           <div class="bible-form">
             <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
@@ -72,123 +70,6 @@
                 class="bible-textarea"
               />
             </n-card>
-          </div>
-        </n-scrollbar>
-        <div class="bible-footer">
-          <n-space :size="8">
-            <n-button size="small" type="primary" :loading="saving" @click="save">保存</n-button>
-            <n-button size="small" @click="openJsonModal">JSON 编辑器</n-button>
-          </n-space>
-        </div>
-      </n-tab-pane>
-
-      <!-- 人物 Tab -->
-      <n-tab-pane name="characters" tab="人物">
-        <n-scrollbar class="bible-scroll">
-          <div class="bible-form">
-            <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
-          <template #header>
-            <div class="bcard-head">
-              <span class="bcard-icon" aria-hidden="true">◆</span>
-              <div>
-                <div class="bcard-title">核心人物卡</div>
-                <div class="bcard-desc">姓名、戏内定位、辨识度与成长线；精细关系边请至「人物关系网」维护。</div>
-              </div>
-            </div>
-          </template>
-          <n-space vertical class="w-full" :size="14">
-            <n-empty
-              v-if="!state.characters.length"
-              description="尚未添加人物"
-              size="small"
-              class="bible-empty"
-            >
-              <template #extra>
-                <n-button size="small" dashed @click="addChar">添加第一位人物</n-button>
-              </template>
-            </n-empty>
-            <div v-for="(c, i) in state.characters" :key="i" class="char-block">
-              <div class="char-block-head">
-                <span class="char-label">人物 {{ i + 1 }}</span>
-                <n-button size="tiny" quaternary type="error" @click="removeChar(i)">移除</n-button>
-              </div>
-              <n-grid :cols="1" :x-gap="12" :y-gap="8">
-                <n-gi>
-                  <n-form-item label="姓名 / 称呼" label-placement="top" :show-feedback="false">
-                    <n-input v-model:value="c.name" placeholder="正文与关系图共用的主称呼" />
-                  </n-form-item>
-                </n-gi>
-                <n-gi>
-                  <n-form-item label="戏内定位" label-placement="top" :show-feedback="false">
-                    <n-input v-model:value="c.role" placeholder="如：视角主角、反派、导师型配角…" />
-                  </n-form-item>
-                </n-gi>
-                <n-gi>
-                  <n-form-item label="辨识度" label-placement="top" :show-feedback="false">
-                    <n-input
-                      v-model:value="c.traits"
-                      type="textarea"
-                      :autosize="{ minRows: 2, maxRows: 6 }"
-                      placeholder="性格、口癖、外貌或行为习惯，便于撰稿保持一致"
-                    />
-                  </n-form-item>
-                </n-gi>
-                <n-gi>
-                  <n-form-item label="弧光 / 本卷要完成的转变" label-placement="top" :show-feedback="false">
-                    <n-input
-                      v-model:value="c.arc_note"
-                      type="textarea"
-                      :autosize="{ minRows: 2, maxRows: 6 }"
-                      placeholder="心理或处境上计划发生的变化，可与大纲对读"
-                    />
-                  </n-form-item>
-                </n-gi>
-              </n-grid>
-            </div>
-            <n-button v-if="state.characters.length" dashed block @click="addChar">+ 添加人物</n-button>
-          </n-space>
-        </n-card>
-          </div>
-        </n-scrollbar>
-        <div class="bible-footer">
-          <n-space :size="8">
-            <n-button size="small" type="primary" :loading="saving" @click="save">保存</n-button>
-            <n-button size="small" @click="openJsonModal">JSON 编辑器</n-button>
-          </n-space>
-        </div>
-      </n-tab-pane>
-
-      <!-- 地点/势力 Tab -->
-      <n-tab-pane name="locations" tab="地点/势力">
-        <n-scrollbar class="bible-scroll">
-          <div class="bible-form">
-            <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
-          <template #header>
-            <div class="bcard-head">
-              <span class="bcard-icon" aria-hidden="true">◇</span>
-              <div>
-                <div class="bcard-title">地点 · 势力 · 场景锚点</div>
-                <div class="bcard-desc">反复出现的空间或组织，一句话能拉回画面即可。</div>
-              </div>
-            </div>
-          </template>
-          <n-space vertical class="w-full" :size="14">
-            <div v-for="(loc, i) in state.locations" :key="i" class="loc-block">
-              <div class="char-block-head">
-                <span class="char-label">条目 {{ i + 1 }}</span>
-                <n-button size="tiny" quaternary type="error" @click="removeLoc(i)">移除</n-button>
-              </div>
-              <n-input v-model:value="loc.name" placeholder="地名、组织或反复场景名" class="mb-8" />
-              <n-input
-                v-model:value="loc.description"
-                type="textarea"
-                :autosize="{ minRows: 2, maxRows: 8 }"
-                placeholder="氛围、势力归属、在本作中的剧情用途（不必过长）"
-              />
-            </div>
-            <n-button dashed block @click="addLoc">+ 添加地点或势力</n-button>
-          </n-space>
-        </n-card>
           </div>
         </n-scrollbar>
         <div class="bible-footer">
@@ -281,17 +162,15 @@ const emptyState = () => ({
 
 const state = ref(emptyState())
 const jsonRaw = ref('')
-const mainTab = ref<'style' | 'characters' | 'locations' | 'timeline'>('style')
+const mainTab = ref<'style' | 'timeline'>('style')
 const showJsonModal = ref(false)
 const saving = ref(false)
 const generating = ref(false)
 
 const stats = computed(() => {
-  const namedChars = state.value.characters.filter(c => (c.name || '').trim()).length
-  const namedLocs = state.value.locations.filter(l => (l.name || '').trim()).length
   const timelineItems = state.value.timeline_notes.map(s => String(s || '').trim()).filter(Boolean).length
   const styleOk = (state.value.style_notes || '').trim().length >= 20
-  return { namedChars, namedLocs, timelineItems, styleOk }
+  return { timelineItems, styleOk }
 })
 
 const syncJsonFromState = () => {
@@ -467,18 +346,6 @@ const generateBible = async () => {
   }
 }
 
-const addChar = () => {
-  state.value.characters.push({ name: '', role: '', traits: '', arc_note: '' })
-}
-const removeChar = (i: number) => {
-  state.value.characters.splice(i, 1)
-}
-const addLoc = () => {
-  state.value.locations.push({ name: '', description: '' })
-}
-const removeLoc = (i: number) => {
-  state.value.locations.splice(i, 1)
-}
 
 watch(
   () => props.slug,

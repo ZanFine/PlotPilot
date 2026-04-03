@@ -65,7 +65,10 @@ async def get_knowledge(
                 predicate=fact.predicate,
                 object=fact.object,
                 chapter_id=fact.chapter_id,
-                note=fact.note
+                note=fact.note,
+                entity_type=fact.entity_type,
+                importance=fact.importance,
+                location_type=fact.location_type
             )
             for fact in knowledge.facts
         ]
@@ -88,14 +91,25 @@ async def update_knowledge(
     Returns:
         更新后的故事知识 DTO
     """
-    data = {
-        "version": request.version,
-        "premise_lock": request.premise_lock,
-        "chapters": [ch.model_dump() for ch in request.chapters],
-        "facts": [fact.model_dump() for fact in request.facts]
-    }
+    import sys
+    print(f"[API] update_knowledge called for {novel_id}, facts: {len(request.facts)}", file=sys.stderr, flush=True)
 
-    knowledge = service.update_knowledge(novel_id, data)
+    try:
+        data = {
+            "version": request.version,
+            "premise_lock": request.premise_lock,
+            "chapters": [ch.model_dump() for ch in request.chapters],
+            "facts": [fact.model_dump() for fact in request.facts]
+        }
+
+        print(f"[API] Calling service.update_knowledge", file=sys.stderr, flush=True)
+        knowledge = service.update_knowledge(novel_id, data)
+        print(f"[API] service.update_knowledge completed", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[API] Exception: {e}", file=sys.stderr, flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
 
     return StoryKnowledgeDTO(
         version=knowledge.version,
@@ -119,7 +133,10 @@ async def update_knowledge(
                 predicate=fact.predicate,
                 object=fact.object,
                 chapter_id=fact.chapter_id,
-                note=fact.note
+                note=fact.note,
+                entity_type=fact.entity_type,
+                importance=fact.importance,
+                location_type=fact.location_type
             )
             for fact in knowledge.facts
         ]

@@ -22,6 +22,9 @@ class KnowledgeTripleDTO(BaseModel):
     object: str = Field(default="", description="宾语")
     chapter_id: Optional[int] = Field(default=None, description="章节号")
     note: str = Field(default="", description="备注")
+    entity_type: Optional[str] = Field(default=None, description="实体类型 (character|location)")
+    importance: Optional[str] = Field(default=None, description="重要程度")
+    location_type: Optional[str] = Field(default=None, description="地点类型 (city|region|building|faction|realm)")
 
 
 class StoryKnowledgeDTO(BaseModel):
