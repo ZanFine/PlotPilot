@@ -51,6 +51,10 @@ class SceneDirectorAnalysis(BaseModel):
         trigger_keywords: List of trigger keywords (defaults to empty list)
         emotional_state: Emotional state description (defaults to empty string)
         pov: Point of view character (defaults to None)
+        performance_notes: Optional list of action-level performance directions
+            (e.g., "eyes flicker", "clenches fist"). Should describe observable
+            actions and emotions without revealing hidden character settings.
+            Defaults to None for backward compatibility.
     """
     characters: List[str] = Field(default_factory=list)
     locations: List[str] = Field(default_factory=list)
@@ -58,6 +62,7 @@ class SceneDirectorAnalysis(BaseModel):
     trigger_keywords: List[str] = Field(default_factory=list)
     emotional_state: str = ""
     pov: Optional[str] = None
+    performance_notes: Optional[List[str]] = None
 
 
 class SceneDirectorAnalyzeResponse(SceneDirectorAnalysis):

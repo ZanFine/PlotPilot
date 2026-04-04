@@ -219,3 +219,53 @@ def test_coerce_raises_on_none():
     with pytest.raises(TypeError, match="Expected dict"):
         svc._coerce(None)
 
+
+@pytest.mark.asyncio
+async def test_analyze_includes_performance_notes():
+    """Test that performance_notes field is parsed when present in LLM response."""
+    llm = Mock()
+    llm.generate = AsyncMock(
+        return_value=GenerationResult(
+            content='{"characters":["A"],"locations":[],"action_types":[],"trigger_keywords":[],"emotional_state":"tense","pov":"A","performance_notes":["eyes flicker","clenches fist"]}',
+            token_usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+    )
+    svc = SceneDirectorService(llm_service=llm)
+    result = await svc.analyze(chapter_number=1, outline="A walks nervously")
+    assert isinstance(result, SceneDirectorAnalysis)
+    assert result.performance_notes == ["eyes flicker", "clenches fist"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_handles_missing_performance_notes():
+    """Test that missing performance_notes field defaults to None for backward compatibility."""
+    llm = Mock()
+    llm.generate = AsyncMock(
+        return_value=GenerationResult(
+            content='{"characters":["A"],"locations":[],"action_types":[],"trigger_keywords":[],"emotional_state":"calm","pov":"A"}',
+            token_usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+    )
+    svc = SceneDirectorService(llm_service=llm)
+    result = await svc.analyze(chapter_number=1, outline="A walks")
+    assert result.performance_notes is None
+
+
+def test_performance_notes_is_list_of_strings():
+    """Test that performance_notes is correctly parsed as a list of strings."""
+    llm = Mock()
+    svc = SceneDirectorService(llm_service=llm)
+    data = {
+        "characters": ["A"],
+        "locations": [],
+        "action_types": [],
+        "trigger_keywords": [],
+        "emotional_state": "nervous",
+        "pov": "A",
+        "performance_notes": ["glances around", "fidgets with hands", "voice trembles"],
+    }
+    result = svc._coerce(data)
+    assert isinstance(result.performance_notes, list)
+    assert all(isinstance(note, str) for note in result.performance_notes)
+    assert result.performance_notes == ["glances around", "fidgets with hands", "voice trembles"]
+

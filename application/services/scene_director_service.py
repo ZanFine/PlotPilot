@@ -12,8 +12,10 @@ from domain.ai.value_objects.prompt import Prompt
 logger = logging.getLogger(__name__)
 
 SCENE_DIRECTOR_SYSTEM = """你是小说场记。根据给定章节大纲，只输出一个 JSON 对象，键为：
-characters, locations, action_types, trigger_keywords, emotional_state, pov。
-characters/locations/action_types/trigger_keywords 均为字符串数组；emotional_state 为简短英文或中文单词；pov 为视点人物名字符串或 null。
+characters, locations, action_types, trigger_keywords, emotional_state, pov, performance_notes。
+characters/locations/action_types/trigger_keywords/performance_notes 均为字符串数组；emotional_state 为简短英文或中文单词；pov 为视点人物名字符串或 null。
+performance_notes 是可选的表演指令列表，描述动作级别的导演指示（如"眼神闪烁"、"握紧拳头"）。
+注意：不要在表演指令中透露角色的隐藏身份或设定，只描述可观察的动作和情绪。
 不要 markdown，不要解释。"""
 
 
@@ -88,6 +90,15 @@ class SceneDirectorService:
                 return [str(x) for x in v if x is not None]
             return [str(v)]
 
+        def as_optional_str_list(key: str) -> list | None:
+            """Convert field to optional list of strings, preserving None for missing fields."""
+            v = data.get(key)
+            if v is None:
+                return None
+            if isinstance(v, list):
+                return [str(x) for x in v if x is not None]
+            return [str(v)]
+
         pov = data.get("pov")
         if pov is not None:
             pov = str(pov).strip() or None
@@ -105,4 +116,5 @@ class SceneDirectorService:
             trigger_keywords=as_str_list("trigger_keywords"),
             emotional_state=emotional_state,
             pov=pov,
+            performance_notes=as_optional_str_list("performance_notes"),
         )
