@@ -153,7 +153,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import { useMessage } from 'naive-ui'
+import { useMessage, useDialog } from 'naive-ui'
 import {
   workflowApi,
   consumeGenerateChapterStream,
@@ -161,6 +161,7 @@ import {
   type GenerateChapterWorkflowResponse,
 } from '../../api/workflow'
 import { chapterApi } from '../../api/chapter'
+import { planningApi } from '../../api/planning'
 import ConsistencyReportPanel from './ConsistencyReportPanel.vue'
 
 export interface ChapterOption {
@@ -178,9 +179,11 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:show', v: boolean): void
   (e: 'saved'): void
+  (e: 'plan-act', actId: string, actTitle: string): void
 }>()
 
 const message = useMessage()
+const dialog = useDialog()
 
 const show = computed({
   get: () => props.show,
@@ -451,11 +454,61 @@ async function saveToChapter() {
     result.value = null
     editedContent.value = ''
     outline.value = ''
+
+    // AI 续规划：判断当前幕是否完成
+    await checkActCompletion(n)
   } catch (e: unknown) {
     const err = e as { response?: { data?: { detail?: string } }; message?: string }
     saveError.value = err.response?.data?.detail || err.message || '保存失败'
   } finally {
     saving.value = false
+  }
+}
+
+// AI 续规划：检查幕是否完成
+async function checkActCompletion(chapterNumber: number) {
+  try {
+    const result = await planningApi.continuePlanning(props.slug, {
+      current_chapter: chapterNumber
+    })
+
+    if (result.act_completed) {
+      if (result.has_next_act) {
+        // 已有下一幕
+        message.success(`${result.message}`)
+      } else if (result.suggest_create_next) {
+        // 询问是否创建新幕
+        dialog.info({
+          title: '幕已完成',
+          content: result.message,
+          positiveText: '创建下一幕',
+          negativeText: '稍后再说',
+          onPositiveClick: async () => {
+            try {
+              const nextAct = await planningApi.createNextAct(result.current_act.id)
+              message.success(`已创建${nextAct.next_act.title}`)
+
+              // 询问是否立即规划章节
+              dialog.info({
+                title: '规划章节',
+                content: `是否为《${nextAct.next_act.title}》规划章节？`,
+                positiveText: '立即规划',
+                negativeText: '稍后再说',
+                onPositiveClick: () => {
+                  // 通知父组件打开幕级规划弹窗
+                  emit('plan-act', nextAct.next_act.id, nextAct.next_act.title)
+                }
+              })
+            } catch (e: any) {
+              message.error(e?.response?.data?.detail || '创建下一幕失败')
+            }
+          }
+        })
+      }
+    }
+  } catch (e: any) {
+    // 续规划失败不影响主流程，只记录日志
+    console.error('AI 续规划失败:', e)
   }
 }
 

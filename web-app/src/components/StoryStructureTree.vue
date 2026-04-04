@@ -56,10 +56,20 @@ watch(() => props.currentChapterId, (chapterId) => {
 
 // 转换节点为 NTree 格式
 const convertToTreeNode = (node: StoryNode): any => {
+  // 根据节点类型设置图标
+  const iconMap: Record<string, string> = {
+    part: '📚',
+    volume: '📖',
+    act: '🎬',
+    chapter: '📄'
+  }
+
   return {
     key: node.id,
-    label: node.display_name,
+    label: node.title,
     ...node,
+    icon: iconMap[node.node_type] || '📄',
+    display_name: node.title,
     children: node.children?.map(convertToTreeNode) || []
   }
 }
@@ -69,23 +79,36 @@ const loadTree = async () => {
   loading.value = true
   try {
     const res = await structureApi.getTree(props.slug)
+    console.log('[StoryStructureTree] API response:', res)
+
+    // 后端返回格式: { novel_id, tree: { novel_id, nodes: [...] } }
+    // 提取 nodes 数组
+    const nodes = res.tree?.nodes || []
+    console.log('[StoryStructureTree] Extracted nodes:', nodes.length, nodes)
 
     // 如果有结构，显示树形视图
-    if (res.tree && res.tree.length > 0) {
-      treeData.value = res.tree.map(convertToTreeNode)
+    if (nodes.length > 0) {
+      treeData.value = nodes.map(convertToTreeNode)
+      console.log('[StoryStructureTree] treeData set:', treeData.value.length)
     } else {
       // 没有结构时，显示空状态，不自动初始化
       treeData.value = []
+      console.log('[StoryStructureTree] No nodes, showing empty state')
     }
   } catch (e: any) {
+    console.error('[StoryStructureTree] Load error:', e)
     message.error(e?.response?.data?.detail || '加载结构失败')
   } finally {
     loading.value = false
+    console.log('[StoryStructureTree] Loading finished, loading =', loading.value)
   }
 }
 
 // 初始化叙事结构（AI 生成第一幕）
 const initializeStructure = async () => {
+  // 防止重复点击
+  if (loading.value) return
+
   try {
     message.info('正在生成第一幕...')
     const res = await structureApi.initializeStructure(props.slug)
@@ -154,23 +177,46 @@ const renderLabel = ({ option }: { option: StoryNode }) => {
   return h('span', { class: 'node-label' }, elements)
 }
 
-// 渲染节点后缀（章节范围/字数）
+// 渲染节点后缀（章节范围/字数/描述）
 const renderSuffix = ({ option }: { option: StoryNode }) => {
-  if (option.node_type === 'chapter' && option.word_count) {
-    return h('span', { class: 'node-range' }, `${option.word_count}字`)
-  }
-  if (option.chapter_start && option.chapter_end) {
-    return h('span', { class: 'node-range' },
-      `${option.chapter_start}-${option.chapter_end}章 (${option.chapter_count})`
+  const elements: any[] = []
+
+  // 显示描述（部、卷、幕）
+  if (option.description && ['part', 'volume', 'act'].includes(option.node_type)) {
+    elements.push(
+      h('span', {
+        class: 'node-description',
+        style: { color: '#999', fontSize: '12px', marginLeft: '8px' }
+      }, option.description)
     )
   }
-  return null
+
+  // 显示章节字数
+  if (option.node_type === 'chapter' && option.word_count) {
+    elements.push(
+      h('span', { class: 'node-range' }, `${option.word_count}字`)
+    )
+  }
+
+  // 显示章节范围
+  if (option.chapter_start && option.chapter_end) {
+    elements.push(
+      h('span', { class: 'node-range' },
+        `${option.chapter_start}-${option.chapter_end}章 (${option.chapter_count})`
+      )
+    )
+  }
+
+  return elements.length > 0 ? h('span', {}, elements) : null
 }
 
 // 节点属性
 const nodeProps = ({ option }: { option: StoryNode }) => {
   return {
-    class: `node-level-${option.level}`
+    class: `node-level-${option.level}`,
+    onContextmenu: (e: MouseEvent) => {
+      handleContextMenu(e, option)
+    }
   }
 }
 

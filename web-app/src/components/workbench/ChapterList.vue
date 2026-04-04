@@ -16,28 +16,6 @@
           size="small"
           style="flex: 1;"
         />
-        <n-button
-          v-if="!chapters.length"
-          size="small"
-          type="primary"
-          secondary
-          :loading="planning"
-          @click="handlePlanNovel"
-          title="使用 AI 生成初始 Bible 和章节大纲"
-        >
-          ✦ AI 初始规划
-        </n-button>
-        <n-button
-          v-else
-          size="small"
-          type="primary"
-          secondary
-          :loading="extending"
-          @click="handleExtendOutline"
-          title="基于当前进度续写后续章节大纲"
-        >
-          ➕ 续写大纲
-        </n-button>
       </div>
     </div>
 
