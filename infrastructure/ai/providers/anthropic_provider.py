@@ -28,7 +28,11 @@ class AnthropicProvider(BaseProvider):
         if not settings.api_key:
             raise ValueError("API key is required for AnthropicProvider")
 
-        client_kw = {"api_key": settings.api_key}
+        client_kw = {
+            "api_key": settings.api_key,
+            "timeout": 300.0,  # 5分钟超时
+            "max_retries": 5,  # 增加重试次数
+        }
         if settings.base_url:
             client_kw["base_url"] = settings.base_url
         self.client = Anthropic(**client_kw)

@@ -1,5 +1,6 @@
 import logging
 from typing import List, Optional, TYPE_CHECKING, Dict, Any
+from dataclasses import dataclass
 from application.world.services.bible_service import BibleService
 from domain.bible.services.relationship_engine import RelationshipEngine
 from domain.novel.services.storyline_manager import StorylineManager
@@ -16,6 +17,25 @@ if TYPE_CHECKING:
     from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Beat:
+    """微观节拍（Beat）
+
+    将章节大纲拆分为多个微观节拍，强制 AI 放慢节奏，增加感官细节。
+
+    示例：
+    - 原大纲："林羽发现真相，和苏晴争吵"
+    - 拆分为 4 个节拍：
+      1. 房间压抑的灯光和两人沉重的呼吸（500字）
+      2. 林羽砸碎水杯，质问苏晴（800字）
+      3. 苏晴不敢直视的微表情（600字）
+      4. 林羽摔门而出，绝不和好（400字）
+    """
+    description: str  # 节拍描述
+    target_words: int  # 目标字数
+    focus: str  # 聚焦点：sensory（感官）、dialogue（对话）、action（动作）、emotion（情绪）
 
 
 class ContextBuilder:
@@ -629,3 +649,162 @@ class ContextBuilder:
             # Layer 2 需要截断
             layer2_truncated = self._truncate_text(layer2, remaining)
             return f"{layer1}\n\n=== SMART RETRIEVAL ===\n{layer2_truncated}"
+
+    def magnify_outline_to_beats(self, outline: str, target_chapter_words: int = 2500) -> List[Beat]:
+        """节拍放大器：将章节大纲拆分为微观节拍
+
+        核心策略：
+        1. 识别大纲中的关键动作/事件
+        2. 为每个动作分配节拍，强制增加感官细节
+        3. 控制单章推进速度，避免节奏过载
+
+        Args:
+            outline: 章节大纲
+            target_chapter_words: 目标章节字数（默认 2500）
+
+        Returns:
+            List[Beat]: 节拍列表
+        """
+        beats = []
+
+        # 简单启发式：检测大纲中的关键词
+        # 后续可接入 LLM 做智能拆分
+        if "争吵" in outline or "冲突" in outline or "质问" in outline:
+            # 情绪冲突场景：拆分为 4 个节拍
+            beats = [
+                Beat(
+                    description="场景氛围描写：压抑的环境、紧张的气氛、人物的微表情",
+                    target_words=500,
+                    focus="sensory"
+                ),
+                Beat(
+                    description="冲突爆发：主角的质问、对方的反应、情绪的升级",
+                    target_words=800,
+                    focus="dialogue"
+                ),
+                Beat(
+                    description="情绪细节：内心独白、回忆闪回、痛苦的挣扎",
+                    target_words=700,
+                    focus="emotion"
+                ),
+                Beat(
+                    description="冲突结果：决裂、离开、或暂时妥协（不要轻易和好）",
+                    target_words=500,
+                    focus="action"
+                ),
+            ]
+        elif "战斗" in outline or "打斗" in outline or "对决" in outline:
+            # 战斗场景：拆分为 5 个节拍
+            beats = [
+                Beat(
+                    description="战前准备：环境描写、双方对峙、紧张的气氛",
+                    target_words=400,
+                    focus="sensory"
+                ),
+                Beat(
+                    description="第一回合：试探性攻击、展示能力、观察弱点",
+                    target_words=600,
+                    focus="action"
+                ),
+                Beat(
+                    description="战斗升级：全力以赴、招式碰撞、环境破坏",
+                    target_words=700,
+                    focus="action"
+                ),
+                Beat(
+                    description="转折点：意外发生、底牌揭露、或受伤",
+                    target_words=500,
+                    focus="emotion"
+                ),
+                Beat(
+                    description="战斗结束：胜负揭晓、战后状态、后续影响",
+                    target_words=300,
+                    focus="action"
+                ),
+            ]
+        elif "发现" in outline or "真相" in outline or "揭露" in outline:
+            # 真相揭露场景：拆分为 3 个节拍
+            beats = [
+                Beat(
+                    description="线索汇聚：主角回忆之前的疑点、逐步推理",
+                    target_words=700,
+                    focus="emotion"
+                ),
+                Beat(
+                    description="真相揭露：关键证据出现、震惊的反应、世界观崩塌",
+                    target_words=1000,
+                    focus="dialogue"
+                ),
+                Beat(
+                    description="情绪余波：接受现实、决定下一步行动",
+                    target_words=800,
+                    focus="emotion"
+                ),
+            ]
+        else:
+            # 默认：日常/过渡场景，拆分为 3 个节拍
+            beats = [
+                Beat(
+                    description="场景开场：环境描写、人物登场、日常互动",
+                    target_words=800,
+                    focus="sensory"
+                ),
+                Beat(
+                    description="主要事件：推进剧情的核心动作或对话",
+                    target_words=1200,
+                    focus="dialogue"
+                ),
+                Beat(
+                    description="场景收尾：情绪沉淀、埋下伏笔、过渡到下一章",
+                    target_words=500,
+                    focus="emotion"
+                ),
+            ]
+
+        # 调整字数分配，确保总和接近目标
+        total_words = sum(b.target_words for b in beats)
+        if total_words != target_chapter_words:
+            ratio = target_chapter_words / total_words
+            for beat in beats:
+                beat.target_words = int(beat.target_words * ratio)
+
+        logger.info(f"节拍放大器：将大纲拆分为 {len(beats)} 个节拍")
+        return beats
+
+    def build_beat_prompt(self, beat: Beat, beat_index: int, total_beats: int) -> str:
+        """构建单个节拍的生成提示
+
+        Args:
+            beat: 节拍对象
+            beat_index: 当前节拍索引（从 0 开始）
+            total_beats: 总节拍数
+
+        Returns:
+            str: 节拍提示文本
+        """
+        focus_instructions = {
+            "sensory": "重点描写感官细节：视觉（光影、色彩）、听觉（声音、静默）、触觉（温度、质感）、嗅觉、味觉。让读者身临其境。",
+            "dialogue": "重点描写对话：人物的语气、表情、肢体语言、对话中的潜台词。对话要推动剧情，展现人物性格。",
+            "action": "重点描写动作：具体的动作细节、力度、速度、节奏。避免抽象描述，要让读者看到画面。",
+            "emotion": "重点描写情绪：内心独白、情绪的起伏、回忆闪回、心理挣扎。深入人物内心世界。",
+        }
+
+        instruction = focus_instructions.get(beat.focus, "")
+
+        prompt = f"""
+【节拍 {beat_index + 1}/{total_beats}】
+目标字数：{beat.target_words} 字
+聚焦点：{beat.focus}
+
+{instruction}
+
+节拍内容：
+{beat.description}
+
+注意：
+- 这是完整章节的一部分，不要写章节标题
+- 不要在节拍结尾强行总结或过渡
+- 专注于当前节拍的内容，自然衔接到下一节拍
+"""
+        return prompt.strip()
+
