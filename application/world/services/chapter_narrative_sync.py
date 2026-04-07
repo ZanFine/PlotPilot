@@ -107,7 +107,12 @@ async def llm_chapter_extract_bundle(
   "key_events": "string",
   "open_threads": "string",
   "relation_triples": [ {"subject": "主体", "predicate": "关系", "object": "客体"} ],
-  "foreshadow_hints": [ {"description": "伏笔或悬念描述"} ],
+  "foreshadow_hints": [ {
+    "description": "伏笔或悬念描述",
+    "suggested_resolve_offset": 5,
+    "importance": "medium",
+    "resolve_hint": "预期回收场景提示"
+  } ],
   "storyline_progress": [ {"type": "主线|支线|感情线", "description": "本章该线进展"} ],
   "tension_score": 50,
   "dialogues": [ {"speaker": "角色名", "content": "对话内容", "context": "对话场景"} ],
@@ -116,6 +121,9 @@ async def llm_chapter_extract_bundle(
 约束：
 - relation_triples：只写文中明确出现的关系，最多 8 条；无则 []。
 - foreshadow_hints：潜在伏笔/未解悬念，最多 4 条；无则 []。
+  - suggested_resolve_offset：建议在多少章后回收（整数，通常 3-15 章），快节奏短篇用 2-5，长篇用 5-15
+  - importance：伏笔重要性，可选 "low"（次要）、"medium"（一般）、"high"（重要）、"critical"（关键）
+  - resolve_hint：简短描述预期回收的场景或剧情点（可选，如"下一幕高潮"）
 - storyline_progress：本章推进的故事线，最多 5 条；无则 []。
 - tension_score：章节张力值 0-100（冲突/悬念/情绪强度），平淡=20-40，正常=40-60，高潮=60-80，巅峰=80-100。
 - dialogues：重要对话（推动剧情/展现性格），最多 10 条；无则 []。
@@ -221,25 +229,61 @@ def persist_bundle_triples_and_foreshadows(
             for h in hints:
                 if not isinstance(h, dict):
                     desc = str(h).strip()
+                    resolve_offset = 5  # 默认 5 章后回收
+                    importance_val = "medium"
+                    resolve_hint = None
                 else:
                     desc = str(h.get("description", "")).strip()
+                    # 获取预期回收章节偏移量
+                    resolve_offset = h.get("suggested_resolve_offset", 5)
+                    try:
+                        resolve_offset = int(resolve_offset)
+                        resolve_offset = max(2, min(30, resolve_offset))  # 限制在 2-30 章
+                    except (ValueError, TypeError):
+                        resolve_offset = 5
+                    # 获取重要性
+                    importance_val = str(h.get("importance", "medium")).strip().lower()
+                    if importance_val not in ("low", "medium", "high", "critical"):
+                        importance_val = "medium"
+                    # 获取回收提示
+                    resolve_hint = h.get("resolve_hint")
+                    if resolve_hint:
+                        resolve_hint = str(resolve_hint).strip()[:100]  # 限制长度
                 if not desc:
                     continue
                 try:
+                    # 计算预期回收章节 = 埋设章节 + 偏移量
+                    suggested_resolve = chapter_number + resolve_offset
                     registry.register(
                         Foreshadowing(
                             id=str(uuid.uuid4()),
                             planted_in_chapter=max(1, chapter_number),
                             description=desc,
-                            importance=ImportanceLevel.MEDIUM,
+                            importance=_importance_str_to_level(importance_val),
                             status=ForeshadowingStatus.PLANTED,
+                            suggested_resolve_chapter=suggested_resolve,
                         )
                     )
-                except Exception:
-                    pass
+                    logger.debug(
+                        "伏笔入库 novel=%s ch=%s resolve=%s importance=%s: %s",
+                        novel_id, chapter_number, suggested_resolve, importance_val, desc[:50]
+                    )
+                except Exception as e:
+                    logger.debug("伏笔入库跳过: %s", e)
             foreshadowing_repo.save(registry)
         except Exception as e:
             logger.warning("伏笔落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+
+
+def _importance_str_to_level(importance_str: str) -> ImportanceLevel:
+    """将字符串转换为 ImportanceLevel 枚举。"""
+    mapping = {
+        "low": ImportanceLevel.LOW,
+        "medium": ImportanceLevel.MEDIUM,
+        "high": ImportanceLevel.HIGH,
+        "critical": ImportanceLevel.CRITICAL,
+    }
+    return mapping.get(importance_str, ImportanceLevel.MEDIUM)
 def _auto_generate_plot_point(
     novel_id: str,
     chapter_number: int,
