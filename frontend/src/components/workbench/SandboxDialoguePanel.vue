@@ -1,16 +1,5 @@
 <template>
   <div class="sandbox-panel">
-    <!-- 顶部提示 -->
-    <n-collapse :default-expanded-names="['help']">
-      <n-collapse-item title="💡 使用说明" name="help">
-        <n-text depth="3" style="font-size: 12px; line-height: 1.6">
-          <strong>角色锚点</strong>：设置角色的心理状态、口头禅、小动作，章节生成时会自动注入。
-          <br />
-          <strong>对话白名单</strong>：从已生成章节中提取的重要对话，可用于参考角色声线。
-        </n-text>
-      </n-collapse-item>
-    </n-collapse>
-
     <!-- 角色锚点卡片 -->
     <n-card title="🎭 角色锚点" size="small" :bordered="true">
       <template #header-extra>
@@ -109,78 +98,70 @@
     </n-card>
 
     <!-- 对话白名单卡片 -->
-    <n-card title="💬 对话白名单" size="small" :bordered="true">
-      <template #header-extra>
-        <n-text v-if="result" depth="3" style="font-size: 12px">
-          共 {{ result.total_count }} 条
-        </n-text>
+    <n-card class="dialogue-section" size="small" :bordered="true">
+      <template #header>
+        <n-space align="center" justify="space-between" style="width: 100%">
+          <n-text strong style="font-size: 14px">💬 对话白名单</n-text>
+          <n-space :size="8" align="center">
+            <!-- 章节筛选 -->
+            <n-select
+              v-model:value="filterChapter"
+              :options="chapterOptions"
+              placeholder="章节"
+              clearable
+              style="width: 90px"
+              size="small"
+            />
+            <!-- 说话人筛选 -->
+            <n-select
+              v-model:value="filterSpeaker"
+              :options="speakerOptions"
+              placeholder="说话人"
+              clearable
+              filterable
+              style="width: 100px"
+              size="small"
+            />
+            <!-- 搜索 -->
+            <n-input
+              v-model:value="searchText"
+              placeholder="搜索..."
+              clearable
+              size="small"
+              style="width: 100px"
+            />
+          </n-space>
+        </n-space>
       </template>
 
-      <n-space vertical :size="10">
-        <!-- 筛选区 -->
-        <n-space :size="8" wrap align="center">
-          <n-input-number
-            v-model:value="filterChapter"
-            :min="1"
-            clearable
-            placeholder="章节"
-            style="width: 80px"
-            size="small"
-            @update:value="debouncedLoad"
-          />
-          <n-select
-            v-model:value="filterSpeaker"
-            :options="speakerOptions"
-            placeholder="说话人"
-            clearable
-            filterable
-            style="width: 120px"
-            size="small"
-            @update:value="debouncedLoad"
-          />
-          <n-input
-            v-model:value="searchText"
-            placeholder="搜索对话内容..."
-            clearable
-            size="small"
-            style="width: 140px"
-          />
-          <n-button
-            size="small"
-            :loading="loading"
-            @click="loadWhitelist"
-          >
-            刷新
-          </n-button>
-        </n-space>
-
-        <!-- 对话列表 -->
-        <n-spin :show="loading">
-          <n-scrollbar style="max-height: 380px">
-            <n-empty v-if="!result" description="加载中..." size="small" />
-            <n-empty v-else-if="result.total_count === 0" description="暂无对话数据，生成章节后自动提取" size="small" />
-            <n-empty v-else-if="filteredDialogues.length === 0" description="无匹配对话" size="small" />
-            <n-space v-else vertical :size="6" style="padding-right: 4px">
-              <n-card
-                v-for="d in filteredDialogues"
-                :key="d.dialogue_id"
-                size="small"
-                :bordered="true"
-                class="dialogue-card"
-                hoverable
-              >
-                <template #header>
-                  <n-space align="center" :size="6">
-                    <n-tag type="info" size="tiny" round>第{{ d.chapter }}章</n-tag>
-                    <n-tag type="warning" size="tiny" round>{{ d.speaker }}</n-tag>
-                  </n-space>
-                </template>
-                <n-text style="font-size: 13px; line-height: 1.6">{{ d.content }}</n-text>
-              </n-card>
-            </n-space>
-          </n-scrollbar>
-        </n-spin>
-      </n-space>
+      <!-- 对话列表 -->
+      <n-spin :show="loading">
+        <n-scrollbar style="max-height: 420px">
+          <n-empty v-if="!result" description="加载中..." size="small" />
+          <n-empty v-else-if="result.total_count === 0" description="暂无对话数据，生成章节后自动提取" size="small" />
+          <n-empty v-else-if="filteredDialogues.length === 0" description="无匹配对话" size="small" />
+          <n-space v-else vertical :size="4" style="padding: 4px 4px 4px 0">
+            <div
+              v-for="d in filteredDialogues"
+              :key="d.dialogue_id"
+              class="dialogue-item"
+            >
+              <div class="dialogue-meta">
+                <n-tag type="info" size="tiny" round>第{{ d.chapter }}章</n-tag>
+                <n-tag type="warning" size="tiny" round>{{ d.speaker }}</n-tag>
+              </div>
+              <n-text class="dialogue-content">{{ d.content }}</n-text>
+            </div>
+          </n-space>
+        </n-scrollbar>
+        
+        <!-- 底部统计 -->
+        <div v-if="result && result.total_count > 0" class="dialogue-footer">
+          <n-text depth="3" style="font-size: 11px">
+            {{ filteredDialogues.length }} / {{ result.total_count }} 条对话
+          </n-text>
+        </div>
+      </n-spin>
     </n-card>
   </div>
 </template>
@@ -223,20 +204,42 @@ const characterOptions = computed(() =>
   characters.value.map(c => ({ label: c.name || c.id, value: c.id }))
 )
 
+// 章节选项（从已有对话中提取）
+const chapterOptions = computed(() => {
+  if (!result.value) return []
+  const chapters = new Set<number>()
+  result.value.dialogues.forEach(d => chapters.add(d.chapter))
+  return Array.from(chapters)
+    .sort((a, b) => a - b)
+    .map(ch => ({ label: `第${ch}章`, value: ch }))
+})
+
 // 说话人选项（从已有对话中提取）
 const speakerOptions = computed(() => {
   if (!result.value) return []
   const speakers = new Set<string>()
   result.value.dialogues.forEach(d => speakers.add(d.speaker))
-  return Array.from(speakers).map(s => ({ label: s, value: s }))
+  return Array.from(speakers)
+    .sort()
+    .map(s => ({ label: s, value: s }))
 })
 
-// 过滤后的对话
+// 过滤后的对话（本地筛选）
 const filteredDialogues = computed<DialogueEntry[]>(() => {
   if (!result.value) return []
   let list = result.value.dialogues
   
-  // 章节筛选（已在 API 层处理，这里保留用于搜索）
+  // 章节筛选
+  if (filterChapter.value !== null) {
+    list = list.filter(d => d.chapter === filterChapter.value)
+  }
+  
+  // 说话人筛选
+  if (filterSpeaker.value) {
+    list = list.filter(d => d.speaker === filterSpeaker.value)
+  }
+  
+  // 关键词搜索
   const kw = searchText.value.trim().toLowerCase()
   if (kw) {
     list = list.filter(d =>
@@ -244,6 +247,7 @@ const filteredDialogues = computed<DialogueEntry[]>(() => {
       d.speaker.toLowerCase().includes(kw)
     )
   }
+  
   return list
 })
 
@@ -326,29 +330,17 @@ async function runGenerate() {
   }
 }
 
-// 加载对话白名单
+// 加载对话白名单（加载全部）
 async function loadWhitelist() {
   loading.value = true
   try {
-    result.value = await sandboxApi.getDialogueWhitelist(
-      props.slug,
-      filterChapter.value ?? undefined,
-      filterSpeaker.value.trim() || undefined
-    )
+    // 不传筛选参数，获取全部对话
+    result.value = await sandboxApi.getDialogueWhitelist(props.slug)
   } catch {
     message.error('加载失败')
   } finally {
     loading.value = false
   }
-}
-
-// 防抖加载
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
-function debouncedLoad() {
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => {
-    loadWhitelist()
-  }, 300)
 }
 
 // 监听 slug 变化
@@ -357,12 +349,16 @@ watch(
   () => {
     loadCharacters()
     loadWhitelist()
+    // 重置筛选
+    filterChapter.value = null
+    filterSpeaker.value = ''
+    searchText.value = ''
     anchor.value = null
     generatedLine.value = ''
   }
 )
 
-// 初始化
+// 初始化：自动加载全部数据
 onMounted(() => {
   loadCharacters()
   loadWhitelist()
@@ -403,12 +399,43 @@ watch(deskTick, () => {
   background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(124, 58, 237, 0.08));
 }
 
-.dialogue-card {
-  transition: all 0.2s ease;
+.dialogue-section :deep(.n-card__header) {
+  padding: 10px 16px !important;
 }
 
-.dialogue-card:hover {
-  transform: translateX(4px);
+.dialogue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--n-color);
+  border-radius: 8px;
+  border: 1px solid var(--n-border-color);
+  transition: all 0.15s ease;
+}
+
+.dialogue-item:hover {
+  border-color: var(--n-border-color-hover);
+  transform: translateX(2px);
+}
+
+.dialogue-meta {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dialogue-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-color-1);
+}
+
+.dialogue-footer {
+  padding-top: 8px;
+  border-top: 1px solid var(--n-border-color);
+  margin-top: 8px;
+  text-align: right;
 }
 
 .sandbox-panel :deep(.n-card) {
