@@ -646,3 +646,33 @@ async def autopilot_events(novel_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+
+@router.get("/{novel_id}/stream-debug")
+async def stream_debug(novel_id: str):
+    """调试端点：检查流式队列状态"""
+    from application.engine.services.streaming_bus import _get_queue, _stream_queue, _injected_queue
+    import multiprocessing as mp
+    
+    queue = _get_queue()
+    current_process = mp.current_process()
+    
+    # 尝试读取一条消息（非阻塞）
+    sample_msg = None
+    if queue is not None:
+        try:
+            sample_msg = queue.get_nowait()
+            # 把消息放回去
+            queue.put(sample_msg)
+        except:
+            pass
+    
+    return {
+        "novel_id": novel_id,
+        "current_process": current_process.name,
+        "is_daemon": current_process.daemon,
+        "queue_available": queue is not None,
+        "_stream_queue_set": _stream_queue is not None,
+        "_injected_queue_set": _injected_queue is not None,
+        "sample_message": sample_msg,
+    }

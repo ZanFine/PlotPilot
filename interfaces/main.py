@@ -158,11 +158,29 @@ def _stop_all_running_novels():
         logger.error(f"❌ 停止运行中小说失败: {e}", exc_info=True)
 
 
-def _run_daemon_in_process(stop_event: threading.Event, log_level: int, log_file: str):
-    """在独立进程中运行守护进程（完全隔离，不阻塞主进程）"""
+def _run_daemon_in_process(
+    stop_event: threading.Event, 
+    log_level: int, 
+    log_file: str,
+    stream_queue=None
+):
+    """在独立进程中运行守护进程（完全隔离，不阻塞主进程）
+    
+    Args:
+        stop_event: 停止信号
+        log_level: 日志级别
+        log_file: 日志文件路径
+        stream_queue: StreamingBus 的队列对象（从主进程传入）
+    """
     # 重新配置日志（子进程需要独立配置）
     from interfaces.api.middleware.logging_config import setup_logging
     setup_logging(level=log_level, log_file=log_file)
+    
+    # 注入流式队列（必须在导入任何使用 streaming_bus 的模块前设置）
+    if stream_queue is not None:
+        from application.engine.services.streaming_bus import inject_stream_queue
+        inject_stream_queue(stream_queue)
+        logger.info("✅ 守护进程：流式队列已注入")
     
     try:
         from scripts.start_daemon import build_daemon
@@ -208,23 +226,23 @@ def _start_autopilot_daemon_thread():
         logger.info("🔒 守护进程自动启动已禁用（DISABLE_AUTO_DAEMON=1）")
         return
     
-    # 重要：在启动守护进程前初始化 StreamingBus 的 Manager
-    # 因为守护进程（daemon=True）不允许创建子进程
-    # Manager() 需要启动一个管理进程，所以必须在主进程中创建
+    # 重要：在启动守护进程前初始化 StreamingBus 的队列
+    # 使用普通 Queue（可以 pickle 序列化传递给子进程）
     from application.engine.services.streaming_bus import init_streaming_bus
-    init_streaming_bus()
+    stream_queue = init_streaming_bus()
     
     _daemon_stop_event = multiprocessing.Event()
     
     # 使用独立进程运行守护进程，完全隔离于主进程的事件循环
+    # 将队列传递给守护进程，实现跨进程通信
     _daemon_process = multiprocessing.Process(
         target=_run_daemon_in_process,
-        args=(_daemon_stop_event, log_level, log_file),
+        args=(_daemon_stop_event, log_level, log_file, stream_queue),
         name="AutopilotDaemon",
         daemon=True,
     )
     _daemon_process.start()
-    logger.info("✅ 守护进程已创建并启动（独立进程模式）")
+    logger.info("✅ 守护进程已创建并启动（独立进程模式，流式队列已传递）")
 
 
 def _stop_autopilot_daemon_thread():
