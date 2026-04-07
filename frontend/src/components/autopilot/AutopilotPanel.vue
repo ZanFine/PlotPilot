@@ -96,10 +96,8 @@
     <!-- 启动配置弹窗 -->
     <n-modal v-model:show="showStartModal" title="自动驾驶配置" preset="dialog" positive-text="启动" @positive-click="start">
       <n-space vertical :size="12" style="width: 100%">
-        <n-alert type="info" :show-icon="true" style="font-size: 12px">
-          <strong>前置条件</strong>：本机需运行<strong>自动驾驶守护进程</strong>（如
-          <code style="font-size: 11px">python scripts/start_daemon.py</code>
-          ），否则数据库状态不会推进。若本书曾异常挂起，请先点「解除挂起并清零计数」或监控大盘「重置」。
+        <n-alert type="success" :show-icon="true" style="font-size: 12px">
+          <strong>自动托管</strong>：守护进程已在后端自动启动，配置好参数后点击"启动"即可开始自动写作。
         </n-alert>
         <n-form>
           <n-form-item label="保护上限（章节数，防止意外消耗）">

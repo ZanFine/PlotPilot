@@ -145,11 +145,9 @@
 
       <!-- 托管撰稿：驾驶舱 + 监控大盘（点击左侧章节会切回辅助撰稿） -->
       <div v-else class="managed-stack">
-        <n-alert type="default" :show-icon="true" class="managed-daemon-hint">
-          <strong>托管依赖守护进程</strong>：需在本机运行
-          <code class="inline-code">python scripts/start_daemon.py</code>
-          轮询数据库；若只启动 API、未跑守护进程，阶段与章节<strong>不会推进</strong>。
-          日志里「阶段」若反复横跳，多为未跑守护进程或 DB 被多处写入。
+        <n-alert type="success" :show-icon="true" class="managed-daemon-hint">
+          <strong>全托管模式</strong>：后端已自动启动守护进程线程，点击「启动全托管」即可开始自动写作。
+          系统将自动进行宏观规划、幕级规划、章节撰写和审计。
         </n-alert>
         <div class="autopilot-container managed-autopilot">
           <AutopilotPanel
