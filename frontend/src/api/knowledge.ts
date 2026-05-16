@@ -1,11 +1,6 @@
-import axios from 'axios'
+import { apiClient } from './config'
 
-const request = axios.create({
-  baseURL: '/api/v1',
-  timeout: 30000,
-})
-
-request.interceptors.response.use(response => response.data)
+const request = apiClient
 
 // TypeScript interfaces
 export interface ChapterSummary {
@@ -15,6 +10,11 @@ export interface ChapterSummary {
   open_threads: string
   consistency_note: string
   beat_sections: string[]
+  micro_beats?: Array<{
+    description: string
+    target_words: number
+    focus: string
+  }>
   sync_status: string
 }
 
@@ -101,5 +101,5 @@ export const knowledgeApi = {
       `/novels/${novelId}/knowledge/generate`,
       {},
       { timeout: 120_000 }
-    ) as Promise<{ success: boolean; message: string; facts_count: number; premise_lock: string }>,
+    ) as unknown as Promise<{ success: boolean; message: string; facts_count: number; premise_lock: string }>,
 }

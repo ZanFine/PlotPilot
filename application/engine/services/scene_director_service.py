@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from application.ai.llm_json_extract import parse_llm_json_to_dict
@@ -11,7 +12,11 @@ from domain.ai.value_objects.prompt import Prompt
 
 logger = logging.getLogger(__name__)
 
-SCENE_DIRECTOR_SYSTEM = """你是小说场记。根据给定章节大纲，只输出一个 JSON 对象，键为：
+# CPMS: 提示词节点 key
+_SCENE_DIRECTOR_NODE_KEY = "scene-director-analysis"
+
+# 硬编码回退（仅在 PromptRegistry 不可用时使用）
+_FALLBACK_SCENE_DIRECTOR_SYSTEM = """你是小说场记。根据给定章节大纲，只输出一个 JSON 对象，键为：
 characters, locations, action_types, trigger_keywords, emotional_state, pov, performance_notes。
 characters/locations/action_types/trigger_keywords/performance_notes 均为字符串数组；emotional_state 为简短英文或中文单词；pov 为视点人物名字符串或 null。
 performance_notes 是可选的表演指令列表，描述动作级别的导演指示（如"眼神闪烁"、"握紧拳头"）。
@@ -26,9 +31,26 @@ class SceneDirectorService:
     _DEFAULT_MAX_TOKENS = 1024
     _DEFAULT_TEMPERATURE = 0.2
 
-    def __init__(self, llm_service: LLMService, *, model: str = "claude-3-5-haiku-20241022"):
+    def __init__(self, llm_service: LLMService, *, model: str = ""):
         self._llm = llm_service
-        self._model = model
+        self._model = model or os.getenv("SYSTEM_MODEL", "")
+
+    def _get_system_prompt(self) -> str:
+        """获取场景导演的 system prompt。
+
+        CPMS: 优先从 PromptRegistry 获取（广场可编辑），
+        如果 Registry 不可用则回退到硬编码默认值。
+        """
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            system = registry.get_system(_SCENE_DIRECTOR_NODE_KEY)
+            if system:
+                return system
+        except Exception as exc:
+            logger.debug("PromptRegistry 不可用，使用回退提示词: %s", exc)
+
+        return _FALLBACK_SCENE_DIRECTOR_SYSTEM
 
     async def analyze(self, chapter_number: int, outline: str) -> SceneDirectorAnalysis:
         """分析章节大纲，提取场景信息
@@ -41,7 +63,7 @@ class SceneDirectorService:
             SceneDirectorAnalysis: 分析结果
         """
         user = f"章节号: {chapter_number}\n大纲:\n{outline.strip()}"
-        prompt = Prompt(system=SCENE_DIRECTOR_SYSTEM, user=user)
+        prompt = Prompt(system=self._get_system_prompt(), user=user)
         config = GenerationConfig(
             model=self._model,
             max_tokens=self._DEFAULT_MAX_TOKENS,
@@ -90,7 +112,7 @@ class SceneDirectorService:
                 return [str(x) for x in v if x is not None]
             return [str(v)]
 
-        def as_optional_str_list(key: str) -> list | None:
+        def as_optional_str_list(key: str) -> Optional[list]:
             """Convert field to optional list of strings, preserving None for missing fields."""
             v = data.get(key)
             if v is None:

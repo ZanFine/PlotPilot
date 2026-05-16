@@ -203,7 +203,7 @@ const importanceTagType = (importance: string) => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #f5f5f5;
+  background: var(--app-page-bg);
 }
 
 .graph-body {
@@ -225,7 +225,7 @@ const importanceTagType = (importance: string) => {
   flex-shrink: 0;
   padding: 12px;
   overflow: auto;
-  background: #fff;
+  background: var(--app-surface);
   border-left: 1px solid #e5e7eb;
 }
 

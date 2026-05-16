@@ -6,8 +6,10 @@
 import json
 import uuid
 import logging
+import re
 from typing import Dict, List, Optional
 from datetime import datetime
+from json_repair import repair_json
 
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from domain.structure.chapter_element import ChapterElement, ElementType, RelationType, Importance
@@ -22,10 +24,268 @@ from domain.ai.value_objects.prompt import Prompt
 from application.audit.services.macro_merge_engine import MacroMergeEngine, MergePlan, MergeConflictException
 
 logger = logging.getLogger(__name__)
+_macro_plan_progress_store: Dict[str, Dict] = {}
+_macro_plan_result_store: Dict[str, Dict] = {}
+_act_chapters_llm_stream_store: Dict[str, str] = {}
+
+
+def get_act_chapters_llm_stream(act_id: str) -> str:
+    """幕级章节规划 LLM 流式累积文本（供 SSE 增量推送）。"""
+    return _act_chapters_llm_stream_store.get(act_id, "")
+
+
+def _reset_act_chapters_llm_stream(act_id: str) -> None:
+    _act_chapters_llm_stream_store[act_id] = ""
+
+
+def _append_act_chapters_llm_stream(act_id: str, delta: str) -> None:
+    if not delta:
+        return
+    _act_chapters_llm_stream_store[act_id] = (
+        _act_chapters_llm_stream_store.get(act_id, "") + delta
+    )
+
+
+# ======================================================================
+#  结构计算引擎 (Structure Calculator)
+#  -------------------------------
+#  唯一真相源：根据 target_chapters 计算出合理的部/卷/幕/章分布。
+#  所有路径（极速模式 / 精密模式 / fallback / 动态幕生成）都必须通过本引擎
+#  获取结构参数，禁止任何地方再硬编码 "3幕" 或 "5章"。
+# ======================================================================
+
+
+def calculate_structure_params(target_chapters: int) -> Dict:
+    """根据目标总章节数，计算最优的结构参数。
+
+    这是整个规划系统的「唯一真相源」(Single Source of Truth)。
+    任何需要知道"该有几幕"、"每幕该几章"的地方都应调用此函数。
+
+    设计原则（基于叙事工程学 + 网文商业实践）：
+    - 一幕 = 一个完整的叙事弧线（激励事件 → 发展 → 高潮 → 降级），至少 5 章
+    - 一卷 = 一个大的故事单元（通常 3-8 幕）
+    - 一部 = 一个大阶段（起源 / 发展 / 决战）
+    - 每幕章数随总篇幅增长：短篇每幕薄，长篇每幕厚（更复杂的情节需要更多篇幅展开）
+
+    Args:
+        target_chapters: 目标总章节数
+
+    Returns:
+        {
+            "parts": int,              # 部数
+            "volumes_per_part": int,   # 每部卷数
+            "acts_per_volume": int,    # 每卷幕数
+            "chapters_per_act": int,   # 每幕建议章数
+            "total_acts": int,         # 总幕数
+            "reasoning": str,           # 计算理由（用于日志）
+        }
+    """
+    t = max(target_chapters, 10)
+
+    if t <= 30:
+        # 短篇：1部1卷3幕，每幕约10章（三幕剧刚好是一个完整故事）
+        parts, vpp, apv = 1, 1, 3
+        cpa = max(t // 3, 5)
+        reason = f"短篇({t}章)：1部×1卷×3幕，每幕{cpa}章，经典三幕剧"
+    elif t <= 80:
+        # 中短篇：1部2-3卷，每卷3-4幕
+        parts, vpp = 1, 2
+        apv = 4 if t > 50 else 3
+        total_acts = vpp * apv
+        cpa = max(t // total_acts, 5)
+        reason = f"中短篇({t}章)：{parts}部×{vpp}卷×{apv}幕={total_acts}幕，每幕{cpa}章"
+    elif t <= 200:
+        # 中篇：2-3部，每部2-3卷，每卷4-5幕
+        parts = 2 if t <= 120 else 3
+        vpp = 3 if t <= 150 else 3
+        apv = 5 if t > 100 else 4
+        total_acts = parts * vpp * apv
+        cpa = max(t // total_acts, 6)
+        reason = f"中篇({t}章)：{parts}部×{vpp}卷×{apv}幕≈{total_acts}幕，每幕{cpa}章"
+    elif t <= 500:
+        # 长篇：3-4部，每部3-4卷，每卷5-7幕
+        parts = 3 if t <= 300 else 4
+        vpp = 3 if t <= 350 else 4
+        apv = 6 if t > 300 else 5
+        total_acts = parts * vpp * apv
+        cpa = max(t // total_acts, 8)
+        reason = f"长篇({t}章)：{parts}部×{vpp}卷×{apv}幕≈{total_acts}幕，每幕{cpa}章"
+    else:
+        # 超长篇(500+)：4-6部，每部4-6卷，每卷6-10幕
+        # 超长篇的幕只规划框架，具体幕在写作时动态生成
+        # 这里给出的是"每卷建议幕数"的上限参考值
+        if t <= 800:
+            parts, vpp, apv = 4, 4, 7
+        elif t <= 1500:
+            parts, vpp, apv = 5, 5, 8
+        else:
+            parts, vpp, apv = 6, 6, 10
+        total_acts = parts * vpp * apv
+        cpa = max(t // total_acts, 10)
+        reason = f"超长篇({t}章)：{parts}部×{vpp}卷×{apv}幕≈{total_acts}幕，每幕{cpa}章（动态扩展）"
+
+    return {
+        "parts": parts,
+        "volumes_per_part": vpp,
+        "acts_per_volume": apv,
+        "chapters_per_act": cpa,
+        "total_acts": parts * vpp * apv,
+        "reasoning": reason,
+    }
+
+
+def _sanitize_llm_json_output(raw: str) -> str:
+    content = (raw or "").strip()
+    content = re.sub(r"\x1b\[[0-9;]*m", "", content)
+    content = re.sub(r"<think\|?>.*?</think\|?>", "", content, flags=re.DOTALL)
+    content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
+    if "```json" in content:
+        content = content.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in content:
+        content = content.split("```", 1)[1].split("```", 1)[0]
+    return content.strip()
+
+
+def _extract_outer_json_value(text: str) -> str:
+    obj_start = text.find("{")
+    arr_start = text.find("[")
+    if obj_start != -1:
+        start = obj_start
+    elif arr_start != -1:
+        start = arr_start
+    else:
+        return text
+
+    root_char = text[start]
+    root_close = "}" if root_char == "{" else "]"
+    depth = 0
+    in_string = False
+    escape = False
+
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == root_char:
+            depth += 1
+            continue
+        if ch == root_close:
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return text[start:]
+
+
+def _repair_json_string(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return text
+
+    try:
+        json.loads(text)
+        return text
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    def _close_json(s: str) -> str:
+        s = s.strip()
+        if not s:
+            return "{}"
+
+        in_string = False
+        escape = False
+        stack = []
+        result = []
+
+        for ch in s:
+            if escape:
+                result.append(ch)
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                result.append(ch)
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                result.append(ch)
+                continue
+            if in_string:
+                result.append(ch)
+                continue
+            if ch == "{":
+                stack.append("}")
+                result.append(ch)
+                continue
+            if ch == "[":
+                stack.append("]")
+                result.append(ch)
+                continue
+            if ch in "}]":
+                if stack and stack[-1] == ch:
+                    stack.pop()
+                result.append(ch)
+                continue
+            result.append(ch)
+
+        if in_string:
+            result.append('"')
+
+        repaired = "".join(result).rstrip()
+        while repaired.endswith(","):
+            repaired = repaired[:-1].rstrip()
+        while stack:
+            while repaired.endswith(","):
+                repaired = repaired[:-1].rstrip()
+            repaired += stack.pop()
+        return repaired
+
+    candidate = text
+    retries = 15
+    while retries > 0 and candidate:
+        repaired = _close_json(candidate)
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError:
+            last_comma = candidate.rfind(",")
+            if last_comma == -1:
+                break
+            candidate = candidate[:last_comma]
+        retries -= 1
+    return _close_json(text)
 
 
 # 导出 MergeConflictException 供路由层使用
 __all__ = ['ContinuousPlanningService', 'MergeConflictException']
+
+
+def get_macro_plan_progress(novel_id: str) -> Dict:
+    return _macro_plan_progress_store.get(novel_id, {
+        "status": "idle",
+        "current": 0,
+        "total": 0,
+        "percent": 0,
+        "message": "",
+        "llm_stream_text": "",
+    }).copy()
+
+
+def get_macro_plan_result(novel_id: str) -> Dict:
+    return _macro_plan_result_store.get(novel_id, {
+        "ready": False,
+        "result": None,
+        "error": None,
+    }).copy()
 
 
 class ContinuousPlanningService:
@@ -51,59 +311,481 @@ class ContinuousPlanningService:
         self.bible_service = bible_service
         self.chapter_repository = chapter_repository
 
+    # ─── CPMS 提示词获取 ───
+
+    @staticmethod
+    def _get_cpms_system(node_key: str, fallback: str = "") -> str:
+        """获取 system prompt。
+
+        CPMS: 优先从 PromptRegistry 获取（广场可编辑），
+        如果 Registry 不可用则回退到硬编码默认值。
+        """
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            system = registry.get_system(node_key)
+            if system:
+                return system
+        except Exception as exc:
+            logger.debug("PromptRegistry 不可用 (%s): %s", node_key, exc)
+
+        return fallback
+
     # ==================== 宏观规划 ====================
 
     async def generate_macro_plan(
         self,
         novel_id: str,
         target_chapters: int,
-        structure_preference: Dict[str, int]
+        structure_preference: Optional[Dict[str, int]] = None,
     ) -> Dict:
         """生成宏观规划"""
         import time
         start_time = time.time()
 
-        print(f"[DEBUG] 开始生成宏观规划: novel_id={novel_id}, target_chapters={target_chapters}")
         logger.info(f"Generating macro plan for novel {novel_id}")
+        self._update_macro_progress(novel_id, status="running", current=0, total=0, message="正在准备结构规划")
 
         # 获取 Bible 信息
-        print(f"[DEBUG] 获取 Bible 上下文...")
         bible_context = self._get_bible_context(novel_id)
-        print(f"[DEBUG] Bible 上下文: {bible_context}")
 
-        # 构建提示词
-        print(f"[DEBUG] 构建提示词...")
-        prompt = self._build_macro_planning_prompt(
+        try:
+            if structure_preference is None:
+                # 构建提示词
+                prompt = self._build_macro_planning_prompt(
+                    bible_context=bible_context,
+                    target_chapters=target_chapters,
+                    structure_preference=structure_preference
+                )
+
+                # 调用 LLM 流式生成规划（SSE 通过 llm_stream_text 推送增量）
+                config = GenerationConfig(max_tokens=4096, temperature=0.7)
+                self._update_macro_progress(
+                    novel_id,
+                    status="running",
+                    message="模型正在输出叙事结构…",
+                )
+                raw = await self._stream_macro_llm_text(novel_id, prompt, config)
+                structure = self._parse_llm_response(raw)
+            else:
+                structure = await self._generate_precise_macro_plan(
+                    novel_id=novel_id,
+                    bible_context=bible_context,
+                    target_chapters=target_chapters,
+                    structure_preference=structure_preference,
+                )
+
+            # 评估规划质量
+            elapsed_time = time.time() - start_time
+            quality_metrics = self._evaluate_macro_plan_quality(
+                structure=structure,
+                bible_context=bible_context,
+                target_chapters=target_chapters,
+                structure_preference=structure_preference
+            )
+
+            logger.info(f"[MacroPlanQuality] novel={novel_id}, time={elapsed_time:.2f}s, metrics={quality_metrics}")
+            self._update_macro_progress(
+                novel_id,
+                status="completed",
+                current=self._get_total_volumes(structure_preference),
+                total=self._get_total_volumes(structure_preference),
+                message="结构规划生成完成",
+            )
+
+            return {
+                "success": True,
+                "structure": structure.get("parts", []),
+                "quality_metrics": quality_metrics,
+                "generation_time": elapsed_time
+            }
+        except Exception:
+            self._update_macro_progress(
+                novel_id,
+                status="failed",
+                message="结构规划生成失败",
+            )
+            raise
+
+    async def _generate_precise_macro_plan(
+        self,
+        novel_id: str,
+        bible_context: Dict,
+        target_chapters: int,
+        structure_preference: Dict[str, int]
+    ) -> Dict:
+        """精密模式：系统先搭固定骨架，整版生成后再定向补全缺失字段。"""
+        skeleton = self._build_precise_structure_skeleton(target_chapters, structure_preference)
+        total_volumes = self._get_total_volumes(structure_preference)
+        self._update_macro_progress(
+            novel_id,
+            status="running",
+            current=0,
+            total=total_volumes,
+            message="正在生成整版叙事骨架",
+        )
+
+        prompt = self._build_precise_macro_prompt(
             bible_context=bible_context,
             target_chapters=target_chapters,
-            structure_preference=structure_preference
+            structure_preference=structure_preference,
+            skeleton=skeleton,
         )
-        print(f"[DEBUG] 提示词: system={prompt.system[:100]}..., user={prompt.user[:100]}...")
-
-        # 调用 LLM 生成规划
-        print(f"[DEBUG] 调用 LLM...")
-        config = GenerationConfig(max_tokens=4096, temperature=0.7)
-        response = await self.llm_service.generate(prompt, config)
-        print(f"[DEBUG] LLM 响应类型: {type(response)}")
-        print(f"[DEBUG] LLM 响应内容: {response}")
-        structure = self._parse_llm_response(response)
-
-        # 评估规划质量
-        elapsed_time = time.time() - start_time
-        quality_metrics = self._evaluate_macro_plan_quality(
-            structure=structure,
-            bible_context=bible_context,
+        config = GenerationConfig(
+            max_tokens=self._calculate_precise_max_tokens(structure_preference),
+            temperature=0.7,
+        )
+        raw = await self._stream_macro_llm_text(novel_id, prompt, config)
+        updates = self._parse_llm_response(raw)
+        self._merge_precise_structure_updates(
+            skeleton=skeleton,
+            updates=updates,
             target_chapters=target_chapters,
-            structure_preference=structure_preference
+            rebalance=False,
+        )
+        self._update_macro_progress(
+            novel_id,
+            status="running",
+            current=max(total_volumes - 1, 0),
+            total=total_volumes,
+            message="正在检查并补全缺失字段",
         )
 
-        logger.info(f"[MacroPlanQuality] novel={novel_id}, time={elapsed_time:.2f}s, metrics={quality_metrics}")
+        incomplete_acts = self._find_incomplete_precise_acts(skeleton)
+        if incomplete_acts:
+            repair_prompt = self._build_precise_repair_prompt(
+                bible_context=bible_context,
+                target_chapters=target_chapters,
+                structure_preference=structure_preference,
+                incomplete_acts=incomplete_acts,
+            )
+            repair_config = GenerationConfig(
+                max_tokens=self._calculate_precise_repair_max_tokens(incomplete_acts),
+                temperature=0.5,
+            )
+            self._clear_macro_llm_stream(novel_id)
+            self._update_macro_progress(
+                novel_id,
+                status="running",
+                message="模型正在补全缺失字段…",
+            )
+            repair_raw = await self._stream_macro_llm_text(novel_id, repair_prompt, repair_config)
+            repair_updates = self._parse_llm_response(repair_raw)
+            self._merge_precise_structure_updates(
+                skeleton=skeleton,
+                updates=repair_updates,
+                target_chapters=target_chapters,
+                rebalance=False,
+            )
 
-        return {
-            "success": True,
-            "structure": structure.get("parts", []),
-            "quality_metrics": quality_metrics,
-            "generation_time": elapsed_time
+        all_acts = [
+            act
+            for part in skeleton.get("parts", [])
+            for volume in part.get("volumes", [])
+            for act in volume.get("acts", [])
+        ]
+        self._rebalance_act_chapters(all_acts, target_chapters)
+        return skeleton
+
+    def _build_precise_structure_skeleton(
+        self,
+        target_chapters: int,
+        structure_preference: Dict[str, int]
+    ) -> Dict:
+        """按用户指定网格构造固定骨架，节点数量不交给 AI 决定。"""
+        parts = structure_preference.get("parts", 3)
+        volumes_per_part = structure_preference.get("volumes_per_part", 3)
+        acts_per_volume = structure_preference.get("acts_per_volume", 3)
+        total_acts = max(parts * volumes_per_part * acts_per_volume, 1)
+        avg_chapters_per_act = max(target_chapters // total_acts, 1)
+
+        structure = {"parts": []}
+        for part_index in range(1, parts + 1):
+            part_node = {
+                "node_id": f"P{part_index}",
+                "title": f"第{part_index}部",
+                "description": "",
+                "volumes": [],
+            }
+            for volume_index in range(1, volumes_per_part + 1):
+                volume_node = {
+                    "node_id": f"V{part_index}_{volume_index}",
+                    "title": f"第{volume_index}卷",
+                    "description": "",
+                    "acts": [],
+                }
+                for act_index in range(1, acts_per_volume + 1):
+                    volume_node["acts"].append({
+                        "node_id": f"A{part_index}_{volume_index}_{act_index}",
+                        "title": f"第{act_index}幕",
+                        "description": "",
+                        "estimated_chapters": avg_chapters_per_act,
+                        "narrative_goal": "",
+                        "plot_points": [],
+                        "key_characters": [],
+                        "key_locations": [],
+                        "emotional_arc": "",
+                        "setup_for": [],
+                        "payoff_from": [],
+                    })
+                part_node["volumes"].append(volume_node)
+            structure["parts"].append(part_node)
+        return structure
+
+    def _merge_precise_structure_updates(
+        self,
+        skeleton: Dict,
+        updates: Dict,
+        target_chapters: int,
+        rebalance: bool = True,
+    ) -> Dict:
+        """将 AI 返回的内容更新合并回固定骨架。"""
+        node_index: Dict[str, Dict] = {}
+        acts: List[Dict] = []
+
+        for part in skeleton.get("parts", []):
+            node_index[part["node_id"]] = part
+            for volume in part.get("volumes", []):
+                node_index[volume["node_id"]] = volume
+                for act in volume.get("acts", []):
+                    node_index[act["node_id"]] = act
+                    acts.append(act)
+
+        for update in updates.get("node_updates", []):
+            if not isinstance(update, dict):
+                continue
+            node_id = str(update.get("node_id") or "").strip()
+            if not node_id or node_id not in node_index:
+                continue
+            self._apply_precise_node_update(node_index[node_id], update)
+
+        if rebalance:
+            self._rebalance_act_chapters(acts, target_chapters)
+        return skeleton
+
+    def _apply_precise_node_update(self, node: Dict, update: Dict) -> None:
+        title = str(update.get("title") or "").strip()
+        description = str(update.get("description") or "").strip()
+        if title:
+            node["title"] = title
+        if description:
+            node["description"] = description
+
+        if "estimated_chapters" in node:
+            estimated = update.get("estimated_chapters")
+            try:
+                node["estimated_chapters"] = max(int(estimated), 0)
+            except (TypeError, ValueError):
+                pass
+            for field in (
+                "narrative_goal",
+                "emotional_arc",
+            ):
+                value = str(update.get(field) or "").strip()
+                if value:
+                    node[field] = value
+            for field in (
+                "plot_points",
+                "key_characters",
+                "key_locations",
+                "setup_for",
+                "payoff_from",
+            ):
+                value = update.get(field)
+                if isinstance(value, list):
+                    node[field] = [str(item).strip() for item in value if str(item).strip()]
+
+    def _rebalance_act_chapters(self, acts: List[Dict], target_chapters: int) -> None:
+        """将各幕 estimated_chapters 归一到目标总章数。"""
+        if not acts:
+            return
+
+        min_each = 1 if target_chapters >= len(acts) else 0
+        remaining = max(target_chapters - min_each * len(acts), 0)
+
+        weights = []
+        for act in acts:
+            try:
+                value = int(act.get("estimated_chapters", 0) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            weights.append(max(value, 1))
+
+        total_weight = sum(weights) or len(acts)
+        scaled = [weight * remaining / total_weight for weight in weights]
+        allocations = [int(value) for value in scaled]
+        leftover = remaining - sum(allocations)
+        remainders = sorted(
+            enumerate(scaled),
+            key=lambda item: item[1] - int(item[1]),
+            reverse=True,
+        )
+        for index, _ in remainders[:leftover]:
+            allocations[index] += 1
+
+        for act, extra in zip(acts, allocations):
+            act["estimated_chapters"] = min_each + extra
+
+    def _calculate_precise_max_tokens(self, structure_preference: Dict[str, int]) -> int:
+        total_volumes = self._get_total_volumes(structure_preference)
+        total_acts = max(
+            structure_preference.get("parts", 0)
+            * structure_preference.get("volumes_per_part", 0)
+            * structure_preference.get("acts_per_volume", 0),
+            1,
+        )
+        return min(12_000, max(3_072, 2_048 + total_volumes * 400 + total_acts * 120))
+
+    def _calculate_precise_repair_max_tokens(self, incomplete_acts: List[Dict]) -> int:
+        return min(6_000, max(1_536, 768 + len(incomplete_acts) * 320))
+
+    def _find_incomplete_precise_acts(self, skeleton: Dict) -> List[Dict]:
+        required_text_fields = ("narrative_goal", "emotional_arc")
+        required_list_fields = ("plot_points", "key_characters", "key_locations")
+        incomplete = []
+        for part in skeleton.get("parts", []):
+            for volume in part.get("volumes", []):
+                for act in volume.get("acts", []):
+                    missing_fields = [
+                        field for field in required_text_fields
+                        if not str(act.get(field) or "").strip()
+                    ]
+                    missing_fields.extend(
+                        field for field in required_list_fields
+                        if not isinstance(act.get(field), list) or not act.get(field)
+                    )
+                    if missing_fields:
+                        incomplete.append({
+                            "node_id": act["node_id"],
+                            "title": act.get("title", ""),
+                            "description": act.get("description", ""),
+                            "missing_fields": missing_fields,
+                        })
+        return incomplete
+
+    def _get_total_volumes(self, structure_preference: Optional[Dict[str, int]]) -> int:
+        if not structure_preference:
+            return 0
+        return max(
+            structure_preference.get("parts", 0) * structure_preference.get("volumes_per_part", 0),
+            0,
+        )
+
+    def _update_macro_progress(
+        self,
+        novel_id: str,
+        *,
+        status: str,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        progress = _macro_plan_progress_store.get(novel_id, {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "message": "",
+            "llm_stream_text": "",
+        }).copy()
+        progress["status"] = status
+        if current is not None:
+            progress["current"] = current
+        if total is not None:
+            progress["total"] = total
+        total_value = progress.get("total", 0) or 0
+        current_value = progress.get("current", 0) or 0
+        progress["percent"] = round(current_value / total_value * 100, 1) if total_value else 0
+        if message is not None:
+            progress["message"] = message
+        _macro_plan_progress_store[novel_id] = progress
+
+    def _clear_macro_llm_stream(self, novel_id: str) -> None:
+        prog = _macro_plan_progress_store.get(novel_id)
+        if not prog:
+            return
+        prog = prog.copy()
+        prog["llm_stream_text"] = ""
+        _macro_plan_progress_store[novel_id] = prog
+
+    def _append_macro_llm_stream(self, novel_id: str, delta: str) -> None:
+        if not delta:
+            return
+        prog = _macro_plan_progress_store.get(novel_id, {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "message": "",
+            "llm_stream_text": "",
+        }).copy()
+        prog["llm_stream_text"] = (prog.get("llm_stream_text") or "") + delta
+        _macro_plan_progress_store[novel_id] = prog
+
+    async def _stream_macro_llm_text(
+        self,
+        novel_id: str,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        """流式调用 LLM，边收 token 边写入宏观进度（供 SSE / 轮询展示）。"""
+        parts: List[str] = []
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+            self._append_macro_llm_stream(novel_id, chunk)
+        return "".join(parts)
+
+    async def _stream_act_plan_llm_text(
+        self,
+        act_id: str,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        parts: List[str] = []
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+            _append_act_chapters_llm_stream(act_id, chunk)
+        return "".join(parts)
+
+    async def _collect_llm_stream_text(
+        self,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        """流式调用 LLM 并拼接全文（无进度存储，用于内部步骤）。"""
+        parts: List[str] = []
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+        return "".join(parts)
+
+    def initialize_macro_plan_task(self, novel_id: str) -> None:
+        _macro_plan_result_store[novel_id] = {
+            "ready": False,
+            "result": None,
+            "error": None,
+        }
+        self._update_macro_progress(
+            novel_id,
+            status="running",
+            current=0,
+            total=0,
+            message="正在准备结构规划",
+        )
+        prog = _macro_plan_progress_store.setdefault(novel_id, {})
+        prog["llm_stream_text"] = ""
+
+    def store_macro_plan_result(self, novel_id: str, result: Dict) -> None:
+        _macro_plan_result_store[novel_id] = {
+            "ready": True,
+            "result": result,
+            "error": None,
+        }
+
+    def store_macro_plan_error(self, novel_id: str, error: str) -> None:
+        _macro_plan_result_store[novel_id] = {
+            "ready": False,
+            "result": None,
+            "error": error,
         }
 
     def _evaluate_macro_plan_quality(
@@ -335,7 +1017,185 @@ class ContinuousPlanningService:
             "summary": plan.summary
         }
 
+    async def _count_macro_structure_nodes(self, novel_id: str) -> int:
+        """部 / 卷 / 幕节点数量（用于落库后展示规模）。"""
+        nodes = await self.story_node_repo.get_by_novel(novel_id)
+        return sum(
+            1
+            for n in nodes
+            if n.node_type in (NodeType.PART, NodeType.VOLUME, NodeType.ACT)
+        )
+
+    async def persist_macro_structure_with_fallback(
+        self,
+        novel_id: str,
+        structure: List[Dict],
+    ) -> Dict:
+        """先安全合并，失败则回退为一次性写入（与全托管守护进程行为一致）。"""
+        try:
+            await self.confirm_macro_plan_safe(novel_id=novel_id, structure=structure)
+            count = await self._count_macro_structure_nodes(novel_id)
+            return {
+                "success": True,
+                "created_nodes": count,
+                "message": f"已同步 {count} 个结构节点",
+            }
+        except Exception as e:
+            logger.warning(
+                f"[{novel_id}] confirm_macro_plan_safe 失败，回退 confirm_macro_plan：{e}"
+            )
+            return await self.confirm_macro_plan(novel_id=novel_id, structure=structure)
+
+    def build_minimal_macro_structure(
+        self,
+        target_chapters: int,
+        *,
+        placeholder_description: str = (
+            "系统生成的占位结构（可在审阅后于结构树中调整）"
+        ),
+    ) -> List[Dict]:
+        """LLM 无有效输出时的最小部–卷–幕骨架（左侧规划与全托管共用）。
+
+        不再硬编码 3 幕！改用 calculate_structure_params 动态计算。
+        """
+        target = max(int(target_chapters or 30), 1)
+        params = calculate_structure_params(target)
+        parts_count = params["parts"]
+        volumes_per_part = params["volumes_per_part"]
+        acts_per_volume = params["acts_per_volume"]
+        chapters_per_act = params["chapters_per_act"]
+
+        logger.info(
+            f"[MinimalFallback] target={target} → "
+            f"{parts_count}部×{volumes_per_part}卷×{acts_per_volume}幕, "
+            f"每幕{chapters_per_act}章 ({params['reasoning']})"
+        )
+
+        structure = []
+        for p in range(1, parts_count + 1):
+            part_node = {
+                "title": f"第{p}部",
+                "description": placeholder_description,
+                "volumes": [],
+            }
+            for v in range(1, volumes_per_part + 1):
+                volume_node = {
+                    "title": f"第{v}卷",
+                    "description": "",
+                    "acts": [],
+                }
+                for a in range(1, acts_per_volume + 1):
+                    global_act = (p - 1) * volumes_per_part * acts_per_volume + (v - 1) * acts_per_volume + a
+                    act_titles = ["开端 · 世界建立", "发展 · 冲突升级", "转折 · 陷入深渊",
+                                   "高潮 · 终极对决", "收尾 · 新世界", "过渡 · 力量积蓄",
+                                   "阴谋 · 暗流涌动", "觉醒 · 真相大白", "抉择 · 牺牲与重生",
+                                   "终局 · 一切归零"]
+                    title_prefix = act_titles[a - 1] if a <= len(act_titles) else f"第{a}幕"
+                    volume_node["acts"].append({
+                        "title": f"第{a}幕 · {title_prefix}",
+                        "description": f"第{p}部-第{v}卷-第{a}幕叙事单元",
+                        "suggested_chapter_count": chapters_per_act,
+                    })
+                part_node["volumes"].append(volume_node)
+            structure.append(part_node)
+        return structure
+
+    def _validate_macro_structure_completeness(self, structure: List[Dict], target_chapters: int) -> bool:
+        """Validate that the macro structure has minimum viable nodes (parts + volumes).
+
+        Returns False if structure is missing volumes, which would cause act planning to fail.
+        """
+        if not structure or not isinstance(structure, list):
+            return False
+
+        has_volumes = False
+        for part in structure:
+            volumes = part.get("volumes", [])
+            if volumes and len(volumes) > 0:
+                has_volumes = True
+                break
+
+        if not has_volumes:
+            logger.warning(
+                f"Macro structure validation failed: structure has parts but no volumes. "
+                f"This will cause act planning to fail. Falling back to minimal structure."
+            )
+            return False
+
+        return True
+
+    async def apply_macro_plan_from_llm_result(
+        self,
+        llm_result: Dict,
+        novel_id: str,
+        target_chapters: int,
+        *,
+        minimal_fallback_on_empty: bool = True,
+    ) -> Dict:
+        """在 `generate_macro_plan` 之后统一落库：有效结构则写入，否则可选占位骨架。
+
+        供 POST /novels/{id}/plan 与全托管守护进程共用，避免两处逻辑分叉。
+        """
+        struct = llm_result.get("structure") if isinstance(llm_result, dict) else None
+
+        # Validate structure completeness (must have parts AND volumes)
+        is_valid_structure = (
+            llm_result.get("success")
+            and isinstance(struct, list)
+            and len(struct) > 0
+            and self._validate_macro_structure_completeness(struct, target_chapters)
+        )
+
+        if is_valid_structure:
+            confirm = await self.persist_macro_structure_with_fallback(
+                novel_id, struct
+            )
+            return {
+                "success": True,
+                "created_nodes": confirm["created_nodes"],
+                "used_minimal_fallback": False,
+                "message": confirm.get("message", ""),
+            }
+
+        if not minimal_fallback_on_empty:
+            raise ValueError(
+                "宏观规划未返回有效结构（success 或 structure 无效或缺少卷节点）"
+            )
+
+        logger.warning(
+            "宏观规划未返回有效结构（success=%r，有卷=%r），使用最小占位结构 novel_id=%s",
+            llm_result.get("success") if isinstance(llm_result, dict) else None,
+            self._validate_macro_structure_completeness(struct, target_chapters) if struct else False,
+            novel_id,
+        )
+        minimal = self.build_minimal_macro_structure(target_chapters)
+        confirm = await self.persist_macro_structure_with_fallback(
+            novel_id, minimal
+        )
+        return {
+            "success": True,
+            "created_nodes": confirm["created_nodes"],
+            "used_minimal_fallback": True,
+            "message": confirm.get("message", ""),
+        }
+
     # ==================== 幕级规划 ====================
+
+    async def resolve_act_planning_chapter_count(
+        self, act_id: str, custom_chapter_count: Optional[int] = None
+    ) -> int:
+        """与 plan_act_chapters 相同的章数解析逻辑，供 SSE 骨架行数等使用。"""
+        act_node = await self.story_node_repo.get_by_id(act_id)
+        if not act_node:
+            raise ValueError(f"幕节点不存在: {act_id}")
+        _default_cpa = calculate_structure_params(100)["chapters_per_act"]
+        chapter_count = custom_chapter_count or act_node.suggested_chapter_count or _default_cpa
+        if not custom_chapter_count and not act_node.suggested_chapter_count:
+            logger.info(
+                f"[ActPlanning] act={act_id} 无自定义章数且无 suggested_chapter_count，"
+                f"使用引擎推荐值 {_default_cpa}"
+            )
+        return chapter_count
 
     async def plan_act_chapters(
         self, act_id: str, custom_chapter_count: Optional[int] = None
@@ -349,22 +1209,24 @@ class ContinuousPlanningService:
 
         bible_context = self._get_bible_context(act_node.novel_id)
         previous_summary = await self._get_previous_acts_summary(act_node)
-        chapter_count = custom_chapter_count or act_node.suggested_chapter_count or 5
+        chapter_count = await self.resolve_act_planning_chapter_count(
+            act_id, custom_chapter_count
+        )
 
         prompt = self._build_act_planning_prompt(
             act_node, bible_context, previous_summary, chapter_count
         )
 
+        _reset_act_chapters_llm_stream(act_id)
+        config = GenerationConfig(max_tokens=4096, temperature=0.7)
         try:
-            response = await self.llm_service.generate(
-                prompt, GenerationConfig(max_tokens=4096, temperature=0.7)
-            )
+            raw = await self._stream_act_plan_llm_text(act_id, prompt, config)
         except Exception as e:
             logger.warning(f"幕级规划 LLM 调用失败 act={act_id}: {e}")
             return {"success": False, "act_id": act_id, "chapters": [], "error": str(e)}
 
         try:
-            plan = self._parse_llm_response(response)
+            plan = self._parse_llm_response(raw)
         except Exception as e:
             logger.warning(f"幕级规划 JSON 解析失败 act={act_id}: {e}")
             return {"success": False, "act_id": act_id, "chapters": [], "parse_error": str(e)}
@@ -737,40 +1599,32 @@ class ContinuousPlanningService:
         """解析 LLM 响应"""
         # 如果是 GenerationResult 对象，提取 content 属性
         if hasattr(response, 'content'):
-            content = response.content.strip()
+            content = response.content
         else:
-            content = response.strip()
+            content = response
 
-        # 调试日志
-        print(f"[DEBUG] LLM 原始响应: {content[:200]}...")
+        cleaned = _sanitize_llm_json_output(content)
+        cleaned = _extract_outer_json_value(cleaned)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
 
-        # 查找 JSON 代码块
-        if "```json" in content:
-            # 提取 ```json 和 ``` 之间的内容
-            start = content.find("```json") + 7
-            end = content.find("```", start)
-            if end != -1:
-                content = content[start:end].strip()
-        elif "```" in content:
-            # 提取第一个 ``` 和最后一个 ``` 之间的内容
-            start = content.find("```") + 3
-            end = content.rfind("```")
-            if end != -1 and end > start:
-                content = content[start:end].strip()
+        try:
+            repaired = repair_json(cleaned)
+            return json.loads(repaired)
+        except Exception:
+            pass
 
-        # 如果还有前缀文字，尝试找到 JSON 开始的位置
-        if not content.startswith("{") and not content.startswith("["):
-            # 查找第一个 { 或 [
-            json_start = min(
-                content.find("{") if "{" in content else len(content),
-                content.find("[") if "[" in content else len(content)
-            )
-            if json_start < len(content):
-                content = content[json_start:]
-
-        print(f"[DEBUG] 清理后的内容: {content[:200]}...")
-
-        return json.loads(content)
+        cleaned = _repair_json_string(cleaned)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse planning JSON: %s", e)
+            logger.error("Planning content length: %d", len(cleaned))
+            logger.error("Planning raw content (first 1000 chars): %s", cleaned[:1000])
+            logger.error("Planning raw content (last 500 chars): %s", cleaned[-500:])
+            raise
 
     def _calculate_chapter_distribution(self, total_chapters: int, parts: int) -> Dict[str, List[int]]:
         """计算黄金比例的章数分配
@@ -831,14 +1685,28 @@ class ContinuousPlanningService:
         return {"part_chapters": part_chapters, "part_ratios": part_ratios}
 
     def _build_quick_macro_prompt(self, bible_context: Dict, target_chapters: int) -> Prompt:
-        """极速模式：破城槌提示词 V3（渐进式规划版）
+        """极速模式：破城槌提示词 V4（智能结构感知版）
 
-        设计哲学：
-        - 超长篇（>500章）：只规划部/卷框架，幕节点动态生成
-        - 中长篇（<500章）：可以规划完整的部/卷/幕结构
-        - 避免单次 LLM 输出过多内容导致截断
+        V4 变更：
+        - 使用 calculate_structure_params 注入结构参数到 prompt 中
+        - 不再使用硬编码的"三幕剧"暗示，改为根据目标篇幅推荐合理幕数
+        - 让 LLM 在一个明确的数量框架内发挥创意
         """
-        
+
+        # 从结构计算引擎获取推荐参数
+        params = calculate_structure_params(target_chapters)
+        rec_acts_per_volume = params["acts_per_volume"]
+        rec_chapters_per_act = params["chapters_per_act"]
+        rec_parts = params["parts"]
+        rec_volumes_per_part = params["volumes_per_part"]
+        total_recommended_acts = params["total_acts"]
+
+        logger.info(
+            f"[QuickPrompt] target={target_chapters} → "
+            f"推荐 {rec_parts}部×{rec_volumes_per_part}卷×{rec_acts_per_volume}幕"
+            f"≈{total_recommended_acts}幕, 每幕~{rec_chapters_per_act}章"
+        )
+
         # 根据章节数决定规划深度
         if target_chapters > 500:
             planning_depth = "framework"  # 只规划部/卷框架
@@ -847,7 +1715,8 @@ class ContinuousPlanningService:
 - 只输出「部」和「卷」的标题与主题（不输出具体幕）
 - 【强制要求】每卷必须输出 estimated_chapters（预估章数）
 - 【章数约束】所有卷的 estimated_chapters 之和必须等于 {target_chapters} 章
-- 每卷建议 50-200 章，根据剧情需要灵活分配
+- 每卷建议 {rec_chapters_per_act * rec_acts_per_volume}-{rec_chapters_per_act * rec_acts_per_volume * 2} 章，根据剧情需要灵活分配
+- 写作时每卷将动态生成约 {rec_acts_per_volume} 幕（每幕约 {rec_chapters_per_act} 章）
 - 幕节点将在写作过程中动态生成
 """
         elif target_chapters > 100:
@@ -857,7 +1726,8 @@ class ContinuousPlanningService:
 - 规划「部」和「卷」的完整结构
 - 【强制要求】每卷必须输出 estimated_chapters（预估章数）
 - 【章数约束】所有卷的 estimated_chapters 之和必须等于 {target_chapters} 章
-- 只为第1-2部的卷规划幕节点（约50-100幕）
+- 【关键参数】建议每卷规划 {rec_acts_per_volume} 幕（每幕约 {rec_chapters_per_act} 章）
+- 只为第1-2部的卷规划幕节点
 - 后续部的幕节点将在写作中动态生成
 """
         else:
@@ -865,7 +1735,9 @@ class ContinuousPlanningService:
             depth_instruction = f"""
 【规划深度】目标章节数<100，完整规划所有部/卷/幕
 - 【强制要求】每幕必须输出 estimated_chapters（预估章数）
+- 【关键参数】建议共 {rec_parts} 部，每部 {rec_volumes_per_part} 卷，每卷 {rec_acts_per_volume} 幕
 - 【章数约束】所有幕的 estimated_chapters 之和必须等于 {target_chapters} 章
+- 每幕建议约 {rec_chapters_per_act} 章
 """
         
         system_msg = f"""# 角色设定
@@ -876,22 +1748,23 @@ class ContinuousPlanningService:
 # 叙事结构理论指导
 <STORY_THEORY>
 你设计的结构应符合以下经典叙事原理：
-1. 三幕剧结构：Setup（设定）→ Confrontation（对抗）→ Resolution（解决）
+1. 多幕级联结构：每一幕是一个完整的「激励事件→发展→高潮→降级」叙事弧线。
+   本篇小说目标 {target_chapters} 章，建议分为约 {total_recommended_acts} 幕
+   （{rec_parts} 部 × 每部约 {rec_volumes_per_part} 卷 × 每卷约 {rec_acts_per_volume} 幕），
+   每幕约 {rec_chapters_per_act} 章。请严格按此数量框架规划。
 2. 英雄之旅：平凡世界→冒险召唤→试炼→深渊→蜕变→归来
-3. 情绪曲线：开篇抓人→中段起伏（小高潮间隔3-5幕）→终局爆发
+3. 情绪曲线：开篇抓人→中段起伏（小高潮间隔2-3幕）→终局爆发
 4. 钩子密度：每部结尾必须有大悬念，每卷结尾有中等悬念，每幕结尾有小悬念
 </STORY_THEORY>
 
-# 核心推演铁律（The Icebreaker Rules V3）
+# 核心推演铁律（The Icebreaker Rules V4）
 <CONSTRAINTS>
-1. 【结构自主】根据目标篇幅智能决定部/卷数量：
-   - 短篇（<50章）：1-2部，每部2-3卷
-   - 中篇（50-200章）：2-3部，每部2-4卷
-   - 长篇（200-500章）：3-5部，每部3-5卷
-   - 超长篇（500-2000章）：4-6部，每部4-6卷
-   - 史诗（>2000章）：5-8部，每部4-8卷
+1. 【结构量化】本次规划的硬性数量约束（必须遵守）：
+   - 总幕数应在 {total_recommended_acts} 幕左右（±20%可接受）
+   - 每卷应包含 {rec_acts_per_volume} 幕左右，不要出现某卷只有1-2幕的情况
+   - 每幕约 {rec_chapters_per_act} 章（重要情节的幕可以多几章，过渡幕可以少几章）
 
-2. 【极致冲突】每一幕（如果有）必须包含：
+2. 【极致冲突】每一幕必须包含：
    - 核心对抗（谁 vs 谁）
    - 赌注（失败会失去什么）
    - 转折（预期违背）
@@ -1017,7 +1890,13 @@ class ContinuousPlanningService:
 }}"""
         return Prompt(system=system_msg, user=user_msg)
 
-    def _build_precise_macro_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict) -> Prompt:
+    def _build_precise_macro_prompt(
+        self,
+        bible_context: Dict,
+        target_chapters: int,
+        structure_preference: Dict,
+        skeleton: Dict,
+    ) -> Prompt:
         """精密模式：手术刀提示词 V2
 
         设计哲学：
@@ -1189,6 +2068,18 @@ class ContinuousPlanningService:
 
         worldview_context = "\n".join(context_parts)
 
+        skeleton_lines = ["【固定结构骨架】"]
+        for part_index, part in enumerate(skeleton.get("parts", []), 1):
+            skeleton_lines.append(f'- {part["node_id"]}: 第{part_index}部')
+            for volume_index, volume in enumerate(part.get("volumes", []), 1):
+                skeleton_lines.append(f'  - {volume["node_id"]}: 第{part_index}部第{volume_index}卷')
+                for act_index, act in enumerate(volume.get("acts", []), 1):
+                    skeleton_lines.append(
+                        f'    - {act["node_id"]}: 第{part_index}部第{volume_index}卷第{act_index}幕，参考 {avg_chapters_per_act} 章'
+                    )
+
+        skeleton_block = "\n".join(skeleton_lines)
+
         user_msg = f"""<STORY_CONTEXT>
 {worldview_context}
 </STORY_CONTEXT>
@@ -1200,33 +2091,198 @@ class ContinuousPlanningService:
 - 平均每幕：约 {avg_chapters_per_act} 章
 </STRUCTURAL_GRID>
 
-请生成严格符合上述网格的叙事结构，JSON格式：
+{skeleton_block}
+
+系统已经固定好了部/卷/幕的数量与层级，你不能新增、删除、合并、拆分任何节点。
+你的任务只是为这些固定节点填写标题、描述和幕级字段。
+
+请只输出 JSON，格式如下：
 {{
-  "parts": [
+  "node_updates": [
     {{
-      "title": "部标题（动词+名词，暗示部内核心冲突）",
-      "volumes": [
-        {{
-          "title": "卷标题（体现卷内叙事重心）",
-          "acts": [
-            {{
-              "title": "幕标题（如：青铜门下的背叛）",
-              "estimated_chapters": 5,
-              "narrative_goal": "本幕在整体结构中的功能",
-              "plot_points": ["情节点1", "情节点2"],
-              "description": "剧情摘要（含因果逻辑）",
-              "key_characters": ["角色ID-功能标注"],
-              "key_locations": ["地点ID-功能标注"],
-              "emotional_arc": "情绪曲线",
-              "setup_for": ["后续幕标题"],
-              "payoff_from": ["前置幕标题"]
-            }}
-          ]
-        }}
-      ]
+      "node_id": "P1 或 V1_1 或 A1_1_1",
+      "title": "节点标题",
+      "description": "节点描述",
+      "estimated_chapters": 5,
+      "narrative_goal": "仅 Act 必填",
+      "plot_points": ["仅 Act 使用"],
+      "key_characters": ["仅 Act 使用"],
+      "key_locations": ["仅 Act 使用"],
+      "emotional_arc": "仅 Act 使用",
+      "setup_for": ["仅 Act 使用"],
+      "payoff_from": ["仅 Act 使用"]
     }}
   ]
-}}"""
+}}
+
+要求：
+1. 每个固定节点都必须返回一条 node_updates。
+2. Part/Volume 只需填写 node_id、title、description。
+3. Act 必须填写全部幕级字段。
+4. 不要返回 parts/volumes/acts 树，不要添加解释文字。
+5. 幕的 estimated_chapters 可以按剧情轻重分配，但总量应尽量接近 {target_chapters} 章。"""
+        return Prompt(system=system_msg, user=user_msg)
+
+    def _build_precise_volume_prompt(
+        self,
+        bible_context: Dict,
+        target_chapters: int,
+        structure_preference: Dict,
+        skeleton: Dict,
+        part_index: int,
+        volume_index: int,
+    ) -> Prompt:
+        """按卷生成内容，缩小上下文范围以提高字段完整度。"""
+        parts = structure_preference.get('parts', 3)
+        volumes_per_part = structure_preference.get('volumes_per_part', 3)
+        acts_per_volume = structure_preference.get('acts_per_volume', 3)
+        total_acts = parts * volumes_per_part * acts_per_volume
+        avg_chapters_per_act = target_chapters // total_acts if total_acts > 0 else 5
+
+        current_part = skeleton["parts"][part_index - 1]
+        current_volume = current_part["volumes"][volume_index - 1]
+        act_scope = current_volume.get("acts", [])
+
+        context_parts = []
+        if bible_context.get("worldview"):
+            context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")
+        if bible_context.get("characters"):
+            char_lines = ["【角色设定】"]
+            for c in bible_context["characters"][:8]:
+                char_lines.append(
+                    f"- {c.get('name', 'Unknown')} (ID: {c.get('id', 'N/A')}): {c.get('description', '')}"
+                )
+            context_parts.append("\n".join(char_lines) + "\n")
+        if bible_context.get("locations"):
+            loc_lines = ["【关键地点】"]
+            for l in bible_context["locations"][:8]:
+                loc_lines.append(
+                    f"- {l.get('name', 'Unknown')} (ID: {l.get('id', 'N/A')}): {l.get('description', '')}"
+                )
+            context_parts.append("\n".join(loc_lines) + "\n")
+        if not context_parts:
+            context_parts.append("【世界观与人物】\n暂无详细设定，请给出通用但完整的单卷叙事设计。\n")
+
+        scope_lines = [
+            f"【当前生成范围】第{part_index}部 / 第{volume_index}卷",
+            f'- {current_part["node_id"]}: {current_part["title"]}',
+            f'- {current_volume["node_id"]}: {current_volume["title"]}',
+        ]
+        for act in act_scope:
+            scope_lines.append(
+                f'- {act["node_id"]}: {act["title"]}，需完整填写 narrative_goal / plot_points / key_characters / key_locations / emotional_arc / setup_for / payoff_from'
+            )
+
+        system_msg = """你是长篇小说结构设计师。当前任务不是规划整本书，而是只完成一个卷的详细结构设计。
+你必须为当前卷内的每一幕填写完整字段，尤其不能遗漏 narrative_goal、plot_points、key_characters、key_locations、emotional_arc。
+请直接输出 JSON，不要解释。"""
+
+        user_msg = f"""<STORY_CONTEXT>
+{"".join(context_parts)}
+</STORY_CONTEXT>
+
+【全书网格】
+- 总章数：{target_chapters} 章
+- 结构：{parts} 部 × {volumes_per_part} 卷/部 × {acts_per_volume} 幕/卷
+- 平均每幕：约 {avg_chapters_per_act} 章
+
+{chr(10).join(scope_lines)}
+
+请仅返回当前卷相关节点的 JSON：
+{{
+  "node_updates": [
+    {{
+      "node_id": "{current_part["node_id"]} 或 {current_volume["node_id"]} 或 {act_scope[0]["node_id"] if act_scope else 'A1_1_1'}",
+      "title": "节点标题",
+      "description": "节点描述",
+      "estimated_chapters": 5,
+      "narrative_goal": "仅 Act 必填，不能为空",
+      "plot_points": ["仅 Act 使用，至少 2 条"],
+      "key_characters": ["仅 Act 使用，至少 1 条"],
+      "key_locations": ["仅 Act 使用，至少 1 条"],
+      "emotional_arc": "仅 Act 使用，不能为空",
+      "setup_for": ["仅 Act 使用"],
+      "payoff_from": ["仅 Act 使用"]
+    }}
+  ]
+}}
+
+要求：
+1. 只返回当前卷涉及的 node_updates。
+2. 当前卷内每个 Act 都必须返回一条更新。
+3. 每个 Act 的 narrative_goal、plot_points、key_characters、key_locations、emotional_arc 都不能为空。
+4. 不要新增或删除节点。"""
+        return Prompt(system=system_msg, user=user_msg)
+
+    def _build_precise_repair_prompt(
+        self,
+        bible_context: Dict,
+        target_chapters: int,
+        structure_preference: Dict,
+        incomplete_acts: List[Dict],
+    ) -> Prompt:
+        """只为缺字段的幕生成补丁。"""
+        parts = structure_preference.get('parts', 3)
+        volumes_per_part = structure_preference.get('volumes_per_part', 3)
+        acts_per_volume = structure_preference.get('acts_per_volume', 3)
+        total_acts = max(parts * volumes_per_part * acts_per_volume, 1)
+        avg_chapters_per_act = max(target_chapters // total_acts, 1)
+
+        context_parts = []
+        if bible_context.get("worldview"):
+            context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")
+        if bible_context.get("characters"):
+            char_lines = ["【角色设定】"]
+            for c in bible_context["characters"][:8]:
+                char_lines.append(f"- {c.get('name', 'Unknown')} (ID: {c.get('id', 'N/A')}): {c.get('description', '')}")
+            context_parts.append("\n".join(char_lines) + "\n")
+        if bible_context.get("locations"):
+            loc_lines = ["【关键地点】"]
+            for l in bible_context["locations"][:8]:
+                loc_lines.append(f"- {l.get('name', 'Unknown')} (ID: {l.get('id', 'N/A')}): {l.get('description', '')}")
+            context_parts.append("\n".join(loc_lines) + "\n")
+        if not context_parts:
+            context_parts.append("【世界观与人物】\n暂无详细设定，请补齐通用但完整的叙事字段。\n")
+
+        act_lines = []
+        for act in incomplete_acts:
+            act_lines.append(
+                f'- {act["node_id"]}: 标题《{act["title"]}》；简介《{act["description"]}》；缺失字段：{", ".join(act["missing_fields"])}'
+            )
+
+        system_msg = """你是小说结构补全助手。你收到的是已经生成好的幕结构，但有些关键字段为空。
+你的任务是只为这些幕补齐缺失字段，不要改写已有完整字段，不要返回解释文字。"""
+
+        user_msg = f"""<STORY_CONTEXT>
+{"".join(context_parts)}
+</STORY_CONTEXT>
+
+【全书约束】
+- 总章数：{target_chapters} 章
+- 结构：{parts} 部 × {volumes_per_part} 卷/部 × {acts_per_volume} 幕/卷
+- 平均每幕：约 {avg_chapters_per_act} 章
+
+【待补全幕】
+{chr(10).join(act_lines)}
+
+请只输出 JSON：
+{{
+  "node_updates": [
+    {{
+      "node_id": "A1_1_1",
+      "narrative_goal": "不能为空",
+      "plot_points": ["至少 2 条"],
+      "key_characters": ["至少 1 条"],
+      "key_locations": ["至少 1 条"],
+      "emotional_arc": "不能为空"
+    }}
+  ]
+}}
+
+要求：
+1. 每个待补全幕都必须返回一条 node_updates。
+2. 只返回缺失字段，不要输出 title、description、estimated_chapters，除非该幕这些字段也为空。
+3. `plot_points` 至少 2 条，`key_characters` 和 `key_locations` 至少各 1 条。"""
         return Prompt(system=system_msg, user=user_msg)
 
     def _build_macro_planning_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict) -> Prompt:
@@ -1241,13 +2297,31 @@ class ContinuousPlanningService:
             return self._build_quick_macro_prompt(bible_context, target_chapters)
         else:
             # 精密模式：使用用户指定的结构
-            return self._build_precise_macro_prompt(bible_context, target_chapters, structure_preference)
+            skeleton = self._build_precise_structure_skeleton(target_chapters, structure_preference)
+            return self._build_precise_macro_prompt(
+                bible_context,
+                target_chapters,
+                structure_preference,
+                skeleton,
+            )
 
     def _build_act_planning_prompt(self, act_node: StoryNode, bible_context: Dict, previous_summary: Optional[str], chapter_count: int) -> Prompt:
-        """构建幕级规划提示词"""
-        system_msg = """你是一个专业的小说章节规划助手，擅长设计章节大纲和情节安排。
-你的任务是根据提供的信息生成章节规划，即使信息不完整也要生成合理的框架。
-请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+        """构建幕级规划提示词
+
+        ★ Phase 3: 增强版——强制标注爽点 + 伏笔收种计划
+        核心改进：
+        1. 每章必须标注 thrill_type（爽点类型）：power_reveal / identity_reveal / action / suspense 等
+        2. 每章必须标注 foreshadow_action（伏笔操作）：plant(种) / resolve(收) / none
+        3. 前三章强制 power_reveal 或 identity_reveal（商业网文铁律）
+        """
+        system_msg = """你是一位手握无数畅销书的狂热白金级网文主编，擅长设计让读者欲罢不能的章节大纲。
+
+你的铁律：
+1. 每章必须有至少一个"爽点"——让读者肾上腺素飙升的时刻
+2. 伏笔必须有计划地"种"和"收"——不能只种不收，也不能无铺垫地收
+3. 前三章必须是 power_reveal（实力展露）或 identity_reveal（身份揭露）——绝不接受 character_intro
+
+请直接输出 JSON 格式，不要添加任何解释性文字。"""
 
         # 构建上下文信息
         context_parts = [f"幕信息：《{act_node.title}》"]
@@ -1268,14 +2342,34 @@ class ContinuousPlanningService:
 
         context = "\n".join(context_parts)
 
+        # ★ Phase 3: 增强型用户提示——强制标注爽点+伏笔收种
         user_msg = f"""{context}
 
-请为这一幕规划 {chapter_count} 个章节。如果没有详细的世界观信息，请生成通用的章节框架。
+请为这一幕规划 {chapter_count} 个章节。每章必须包含爽点标注和伏笔操作。
 
-要求：
-1. 每个章节需要有标题和大纲
-2. 如果有可用的人物和地点，尽量关联；如果没有，可以留空
-3. 章节编号从 1 开始递增
+★★★ 爽点类型说明（thrill_type 必选其一）★★★
+- power_reveal: 实力/能力展露（主角亮出底牌，旁观者震惊）
+- identity_reveal: 身份/地位揭露（隐藏身份曝光，全场震动）
+- action: 战斗/对峙高潮（激烈冲突，胜负翻转）
+- suspense: 悬念爆发（重大真相揭露，认知颠覆）
+- emotion: 情感爆发（极致情感冲击，催泪/燃点）
+- hook: 钩子开场（以强冲突开场，立刻抓住读者）
+
+★★★ 伏笔操作说明（foreshadow_action 必选其一）★★★
+- plant: 种下新伏笔（埋下未来线索，暗示更大秘密）
+- resolve: 回收旧伏笔（揭晓之前的悬念，给读者满足感）
+- plant_and_resolve: 同时种新收旧（最佳节奏——满足读者同时吊住胃口）
+- none: 无伏笔操作（仅限纯动作/过渡章节，每幕不超过2章）
+
+★★★ 前三章铁律 ★★★
+第1章：必须是 hook + power_reveal 或 identity_reveal
+第2章：必须有 power_reveal 或 identity_reveal
+第3章：必须有 action 或 power_reveal
+
+★★★ 伏笔节奏铁律 ★★★
+- 本幕内种下的伏笔，必须有至少1条在本幕或下一幕回收
+- 不能连续2章都是 foreshadow_action=none
+- 最后一章必须 resolve 或 plant_and_resolve
 
 请直接输出 JSON 格式，不要添加任何说明文字：
 {{
@@ -1283,9 +2377,13 @@ class ContinuousPlanningService:
     {{
       "number": 1,
       "title": "章节标题",
-      "outline": "章节大纲（100-200字）",
+      "outline": "章节大纲（100-200字，必须描述爽点的具体内容）",
       "characters": ["人物ID"],
-      "locations": ["地点ID"]
+      "locations": ["地点ID"],
+      "thrill_type": "power_reveal",
+      "thrill_description": "爽点描述：主角在什么场景下展露了什么实力/身份，旁观者如何反应",
+      "foreshadow_action": "plant",
+      "foreshadow_detail": "伏笔细节：种下/回收了什么伏笔"
     }}
   ]
 }}"""
@@ -1328,6 +2426,10 @@ class ContinuousPlanningService:
         - 强制注入待回收伏笔
         - 注入角色当前状态锚点
         """
+        # 使用结构计算引擎获取推荐每幕章数（替代硬编码的 5）
+        # 通过 current_act 的 novel_id 查找小说目标章节数
+        _default_cpa = calculate_structure_params(100)["chapters_per_act"]  # 保守默认值
+
         # 收集双轨上下文
         dual_track_context = await self._collect_dual_track_context(novel_id, current_act, bible_context)
         
@@ -1335,15 +2437,18 @@ class ContinuousPlanningService:
         prompt = self._build_next_act_prompt_with_dual_track(current_act, dual_track_context)
         
         try:
-            response = await self.llm_service.generate(prompt, GenerationConfig(max_tokens=4096, temperature=0.7))
-            result = self._parse_llm_response(response)
+            raw = await self._collect_llm_stream_text(
+                prompt,
+                GenerationConfig(max_tokens=4096, temperature=0.7),
+            )
+            result = self._parse_llm_response(raw)
             
             # 确保返回必要的字段
             if not isinstance(result, dict):
                 result = {}
             result.setdefault("title", f"第{current_act.number + 1}幕")
             result.setdefault("description", "继续推进剧情")
-            result.setdefault("suggested_chapter_count", 5)
+            result.setdefault("suggested_chapter_count", _default_cpa)
             
             return result
         except Exception as e:
@@ -1351,7 +2456,7 @@ class ContinuousPlanningService:
             return {
                 "title": f"第{current_act.number + 1}幕",
                 "description": "描述",
-                "suggested_chapter_count": 5
+                "suggested_chapter_count": _default_cpa
             }
     
     async def _collect_dual_track_context(
@@ -1460,13 +2565,10 @@ class ContinuousPlanningService:
     ) -> Prompt:
         """构建双轨融合的下一幕生成 Prompt"""
         
-        system = """你是一位资深的小说结构设计师，擅长在长篇叙事中推进剧情。
-你的任务是为下一幕设计详细的内容规划，确保：
-1. 与前文保持连贯，不出现时间线或人物状态矛盾
-2. 有意识地回收或推进已有伏笔
-3. 设置新的冲突和悬念
-
-请直接输出 JSON 格式，不要添加解释性文字。"""
+        system = self._get_cpms_system(
+            "continuous-planning-next-act",
+            "你是一位资深的小说结构设计师，擅长在长篇叙事中推进剧情。\n你的任务是为下一幕设计详细的内容规划，确保：\n1. 与前文保持连贯，不出现时间线或人物状态矛盾\n2. 有意识地回收或推进已有伏笔\n3. 设置新的冲突和悬念\n\n请直接输出 JSON 格式，不要添加解释性文字。",
+        )
         
         # 组装双轨上下文
         context_parts = []

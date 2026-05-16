@@ -2,7 +2,7 @@
   <div class="cgc-root">
     <div class="cgc-toolbar">
       <n-text depth="3" class="cgc-hint">
-        从三元组自动生成（只读）· 要编辑人物关系，请在「叙事与知识」中修改三元组 · 点节点进入全页查看
+        从三元组自动生成（只读）；若无人物三元组会自动合并 Bible 关系。占位实体名（char 005 等）已过滤。
       </n-text>
       <n-space :size="8">
         <n-button size="small" quaternary :loading="loading" @click="reload">刷新</n-button>
@@ -10,7 +10,7 @@
       </n-space>
     </div>
     <div v-if="emptyHint" class="cgc-empty">
-      <n-empty description="尚无人物相关三元组，请在「叙事与知识」中添加" size="small" />
+      <n-empty description="尚无可用人物关系（知识库为空且 Bible 未配置结构化关系）" size="small" />
     </div>
     <div v-else class="cgc-canvas">
       <GraphChart :nodes="nodes" :links="links" height="100%" @node-click="handleNodeClick" />
@@ -22,13 +22,15 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { knowledgeApi } from '../../api/knowledge'
+import { bibleApi } from '../../api/bible'
 import GraphChart from '../charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge } from '../../utils/visToEcharts'
-import type { EChartsNode, EChartsLink } from '../../utils/visToEcharts'
+import type { EChartsNode } from '../../utils/visToEcharts'
 import {
   tripleStringAttrs,
   characterImportanceZh,
 } from '../../utils/knowledgeFactDisplay'
+import { mergeKnowledgeFactsWithBibleCharacters } from '../../utils/characterGraphMerge'
 
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
@@ -38,7 +40,7 @@ interface KnowledgeTriple {
   subject: string
   predicate: string
   object: string
-  chapter_id?: number
+  chapter_id?: number | null
   note?: string
   entity_type?: string
   importance?: string
@@ -154,10 +156,17 @@ const reload = async () => {
   loading.value = true
   try {
     const data = await knowledgeApi.getKnowledge(props.slug)
+    let merged = (data.facts || []) as KnowledgeTriple[]
+    try {
+      const bible = await bibleApi.getBible(props.slug)
+      merged = mergeKnowledgeFactsWithBibleCharacters(merged, bible.characters || []) as KnowledgeTriple[]
+    } catch {
+      merged = mergeKnowledgeFactsWithBibleCharacters(merged, []) as KnowledgeTriple[]
+    }
 
     // Only update if this is still the latest request
     if (currentRequestId === requestId) {
-      triples.value = data.facts || []
+      triples.value = merged
     }
   } catch (error) {
     console.error('Failed to load knowledge data:', error)
@@ -199,9 +208,9 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   position: relative;
-  background: #fafafa;
+  background: var(--app-surface-subtle);
   border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  border: 1px solid var(--app-border-strong);
   overflow: hidden;
 }
 
@@ -212,8 +221,8 @@ onMounted(async () => {
   align-items: flex-start;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
-  background: #fff;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface);
 }
 
 .cgc-hint {

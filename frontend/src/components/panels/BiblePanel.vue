@@ -20,7 +20,7 @@
           </div>
           <div class="bible-role-item bible-role-here">
             <span class="bible-role-k">写作风格</span>
-            <span class="bible-role-v">此处 · 文风公约</span>
+            <span class="bible-role-v">本书锁定 · 文风市场预设（只读标签）</span>
           </div>
           <div class="bible-role-item">
             <span class="bible-role-k">角色与地点</span>
@@ -28,17 +28,25 @@
           </div>
           <div class="bible-role-item">
             <span class="bible-role-k">叙事线索</span>
-            <span class="bible-role-v">故事线/情节弧/时间线</span>
+            <span class="bible-role-v">故事线/时间线</span>
           </div>
         </div>
-        <div class="bible-stats" aria-live="polite">
-          <span class="bible-stat bible-stat-premise" :class="{ 'is-done': stats.premiseOk }">
-            梗概锁定 {{ stats.premiseOk ? '已填' : '待补充' }}
-          </span>
-          <span class="bible-stat-dot" aria-hidden="true" />
-          <span class="bible-stat bible-stat-style" :class="{ 'is-done': stats.styleOk }">
-            文风公约 {{ stats.styleOk ? '已填' : '待补充' }}
-          </span>
+        <div class="bible-stats" :aria-busy="!biblePanelDataReady">
+          <template v-if="biblePanelDataReady">
+            <span class="bible-stat bible-stat-premise" :class="{ 'is-done': stats.premiseOk }">
+              梗概锁定 {{ stats.premiseOk ? '已填' : '待补充' }}
+            </span>
+            <span class="bible-stat-dot" aria-hidden="true" />
+            <span class="bible-stat bible-stat-style" :class="{ 'is-done': stats.styleOk }">
+              文风公约 {{ stats.styleOk ? '已填' : '待补充' }}
+            </span>
+          </template>
+          <template v-else>
+            <!-- 占位与正式行等高，避免先发「待补充」再跳到「已填」造成闪烁 -->
+            <span class="bible-stat bible-stat-placeholder">梗概锁定 …</span>
+            <span class="bible-stat-dot" aria-hidden="true" />
+            <span class="bible-stat bible-stat-placeholder">文风公约 …</span>
+          </template>
         </div>
       </div>
       <n-space class="bible-hero-actions" :size="8" align="center">
@@ -49,8 +57,64 @@
       </n-space>
     </header>
 
-    <n-scrollbar class="bible-scroll">
+    <n-scrollbar class="bible-scroll" :class="{ 'bible-scroll--surface-pending': !biblePanelDataReady }">
       <div class="bible-form">
+        <n-card
+          v-if="hasBookLock"
+          size="small"
+          class="bible-card bible-card-creation-lock"
+          :bordered="false"
+          :segmented="{ content: true, footer: false }"
+        >
+          <template #header>
+            <div class="bcard-head">
+              <span class="bcard-icon bcard-icon-lock" aria-hidden="true">◎</span>
+              <div>
+                <div class="bcard-title">本书锁定</div>
+                <div class="bcard-desc">
+                  赛道、世界观与文风市场预设仅作展示，不提供修改入口（与创建书目 / Bible 初始约定一致）。
+                </div>
+              </div>
+            </div>
+          </template>
+          <n-descriptions
+            :column="1"
+            label-placement="left"
+            size="small"
+            class="bible-creation-lock-desc"
+          >
+            <n-descriptions-item label="赛道 / 类型">{{ lockedGenre || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="世界观基调">{{ lockedWorld || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="文风市场预设">
+              <n-space size="small" wrap align="center">
+                <n-tag
+                  :type="stylePresetTag.tagType"
+                  size="small"
+                  round
+                  :bordered="false"
+                >
+                  {{ stylePresetTag.label }}
+                </n-tag>
+              </n-space>
+            </n-descriptions-item>
+          </n-descriptions>
+          <n-collapse
+            v-show="hasStyleNotesDetail"
+            class="bible-style-full-collapse"
+          >
+            <n-collapse-item title="查看完整文风公约文本" name="style">
+              <n-input
+                :value="state.style_notes"
+                type="textarea"
+                readonly
+                disabled
+                :autosize="{ minRows: 4, maxRows: 14 }"
+                class="bible-textarea bible-textarea-readonly"
+              />
+            </n-collapse-item>
+          </n-collapse>
+        </n-card>
+
         <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
           <template #header>
             <div class="bcard-head bcard-head-row">
@@ -86,80 +150,6 @@
           />
         </n-card>
 
-        <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
-          <template #header>
-            <div class="bcard-head">
-              <span class="bcard-icon bcard-icon-text" aria-hidden="true">文</span>
-              <div>
-                <div class="bcard-title">叙事与风格公约</div>
-                <div class="bcard-desc">人称、时态、叙事距离、基调与禁区——全书的「怎么写」。</div>
-              </div>
-            </div>
-          </template>
-          <n-input
-            v-model:value="state.style_notes"
-            type="textarea"
-            :autosize="{ minRows: 5, maxRows: 22 }"
-            placeholder="建议写明：第三人称有限 / 全知；冷幽默或克制；是否允许破墙、血腥、感情线尺度；参考气质（勿抄原文）…"
-            show-count
-            :maxlength="12000"
-            class="bible-textarea"
-          />
-        </n-card>
-
-        <!-- 文风样本区块 -->
-        <n-card size="small" class="bible-card" :bordered="false" :segmented="{ content: true, footer: false }">
-          <template #header>
-            <div class="bcard-head">
-              <span class="bcard-icon bcard-icon-voice" aria-hidden="true">🎙</span>
-              <div>
-                <div class="bcard-title">文风样本（AI 学习用）</div>
-                <div class="bcard-desc">提交「AI 原稿 → 你的改稿」对，生成时 AI 会自动遵循你的改写习惯。
-                  <span v-if="fingerprint"> · 当前共 {{ fingerprint.sample_count }} 个样本，平均句长 {{ fingerprint.avg_sentence_length.toFixed(1) }} 字</span>
-                </div>
-              </div>
-            </div>
-          </template>
-          <n-space vertical :size="12">
-            <n-form-item label="AI 原稿" label-placement="top" :show-feedback="false">
-              <n-input
-                v-model:value="voiceForm.ai_original"
-                type="textarea"
-                :autosize="{ minRows: 3, maxRows: 8 }"
-                placeholder="粘贴 AI 生成的原文段落（改稿前）"
-              />
-            </n-form-item>
-            <n-form-item label="你的改稿" label-placement="top" :show-feedback="false">
-              <n-input
-                v-model:value="voiceForm.author_refined"
-                type="textarea"
-                :autosize="{ minRows: 3, maxRows: 8 }"
-                placeholder="粘贴你修改后的版本（AI 将学习你的改法）"
-              />
-            </n-form-item>
-            <n-space :size="8" align="center">
-              <n-form-item label="来自章节" label-placement="left" label-width="70" :show-feedback="false">
-                <n-input-number v-model:value="voiceForm.chapter_number" :min="1" style="width:90px" />
-              </n-form-item>
-              <n-form-item label="场景类型" label-placement="left" label-width="70" :show-feedback="false">
-                <n-select
-                  v-model:value="voiceForm.scene_type"
-                  :options="sceneTypeOptions"
-                  style="width:120px"
-                />
-              </n-form-item>
-              <n-button
-                type="primary"
-                size="small"
-                :loading="voiceSaving"
-                :disabled="!voiceForm.ai_original.trim() || !voiceForm.author_refined.trim()"
-                @click="submitVoiceSample"
-              >
-                提交样本
-              </n-button>
-            </n-space>
-          </n-space>
-        </n-card>
       </div>
     </n-scrollbar>
 
@@ -190,17 +180,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { bibleApi } from '../../api/bible'
 import type { CharacterDTO, LocationDTO, TimelineNoteDTO, StyleNoteDTO } from '../../api/bible'
 import { knowledgeApi } from '../../api/knowledge'
-import { voiceApi } from '../../api/voice'
-import type { VoiceFingerprintDTO } from '../../api/voice'
+import { MARKET_STYLE_PRESETS, matchPresetValue } from '@/constants/marketStylePresets'
+import { novelApi } from '@/api/novel'
+import { parseGenreWorldFromPremise } from '@/utils/premisePresets'
 
-
-
-const props = defineProps<{ slug: string }>()
+const props = withDefaults(
+  defineProps<{ slug: string; reloadNonce?: number }>(),
+  { reloadNonce: 0 },
+)
 const message = useMessage()
 
 interface BibleCharacter {
@@ -227,40 +219,42 @@ const saving = ref(false)
 const generating = ref(false)
 const premiseLock = ref('')
 const generatingKnowledge = ref(false)
+/** 本作数据是否已从接口合并完成（避免首帧「待补充」→「已填」与下方表单高度连环闪） */
+const biblePanelDataReady = ref(false)
 
-// 文风样本
-const voiceForm = ref({ ai_original: '', author_refined: '', chapter_number: 1, scene_type: 'general' })
-const voiceSaving = ref(false)
-const fingerprint = ref<VoiceFingerprintDTO | null>(null)
-const sceneTypeOptions = [
-  { label: '通用', value: 'general' },
-  { label: '战斗', value: 'combat' },
-  { label: '对话', value: 'dialogue' },
-  { label: '心理', value: 'inner' },
-  { label: '环境', value: 'environment' },
-]
+/** 并发 load 取消：只应用最后一次 slug 对应的请求结果，避免多块 UI v-if/v-show 交替闪烁 */
+let biblePanelLoadSeq = 0
 
-const loadFingerprint = async () => {
-  try {
-    fingerprint.value = await voiceApi.getFingerprint(props.slug)
-  } catch {
-    fingerprint.value = null
+/** 创建书目时写入 premise 的赛道 / 世界观；文风来自 Bible（只读标签展示） */
+const lockedGenre = ref('')
+const lockedWorld = ref('')
+const hasBookLock = computed(() => {
+  const g = lockedGenre.value.trim()
+  const w = lockedWorld.value.trim()
+  const sty = (state.value.style_notes || '').trim()
+  return g !== '' || w !== '' || sty !== ''
+})
+
+const hasStyleNotesDetail = computed(() => (state.value.style_notes || '').trim().length > 0)
+
+/** 文风市场预设：匹配内置模板则显示预设名，否则警告文案（单组件避免 v-if 整节点销毁重建） */
+const stylePresetTag = computed(() => {
+  const t = (state.value.style_notes || '').trim()
+  if (!t) {
+    return { matched: false, hasText: false, label: '—', tagType: 'default' as const }
   }
-}
-
-const submitVoiceSample = async () => {
-  voiceSaving.value = true
-  try {
-    await voiceApi.createSample(props.slug, voiceForm.value)
-    message.success('文风样本已提交，AI 将在下次生成时参考你的改写习惯')
-    voiceForm.value = { ai_original: '', author_refined: '', chapter_number: 1, scene_type: 'general' }
-    await loadFingerprint()
-  } catch {
-    message.error('提交失败')
-  } finally {
-    voiceSaving.value = false
+  const m = matchPresetValue(t)
+  if (m) {
+    const p = MARKET_STYLE_PRESETS.find((x) => x.value === m)
+    return { matched: true, hasText: true, label: p?.label ?? m, tagType: 'info' as const }
   }
-}
+  return {
+    matched: false,
+    hasText: true,
+    label: '与内置模板不一致（可能来自旧数据或导入）',
+    tagType: 'warning' as const,
+  }
+})
 
 const stats = computed(() => {
   const styleOk = (state.value.style_notes || '').trim().length >= 20
@@ -337,35 +331,80 @@ const toApiFormat = (data: any) => {
   return { characters, world_settings: [], locations, timeline_notes: [], style_notes }
 }
 
-const loadPremiseLock = async () => {
+function styleNotesWithCreationDefault(styleNotes: string): string {
+  const t = (styleNotes || '').trim()
+  if (t) return styleNotes
+  const v = MARKET_STYLE_PRESETS[0]?.value ?? 'xianxia_hot'
+  const p = MARKET_STYLE_PRESETS.find((x) => x.value === v)
+  return p?.body ?? ''
+}
+
+/** 并行阶段内解析 Bible；404 时自动 create 后再拉一次 */
+async function fetchBibleStateForPanel(slug: string): Promise<ReturnType<typeof emptyState>> {
   try {
-    const k = await knowledgeApi.getKnowledge(props.slug)
-    premiseLock.value = k.premise_lock || ''
-  } catch {
-    premiseLock.value = ''
+    const bible = await bibleApi.getBible(slug)
+    let ui = fromApiFormat(bible)
+    if (!matchPresetValue(ui.style_notes) && !(ui.style_notes || '').trim()) {
+      ui = { ...ui, style_notes: styleNotesWithCreationDefault('') }
+    }
+    return ui
+  } catch (err: any) {
+    if (err?.response?.status !== 404) throw err
+    try {
+      await bibleApi.createBible(slug, `bible-${slug}`)
+    } catch {
+      message.error('创建设定失败')
+      return emptyState()
+    }
+    const bible = await bibleApi.getBible(slug)
+    let ui = fromApiFormat(bible)
+    if (!matchPresetValue(ui.style_notes) && !(ui.style_notes || '').trim()) {
+      ui = { ...ui, style_notes: styleNotesWithCreationDefault('') }
+    }
+    return ui
   }
 }
 
-const load = async () => {
+const load = async (opts?: { preserveSurface?: boolean }) => {
+  const seq = ++biblePanelLoadSeq
+  const slug = props.slug
+  if (!opts?.preserveSurface) {
+    biblePanelDataReady.value = false
+  }
+
   try {
-    const bible = await bibleApi.getBible(props.slug)
-    state.value = fromApiFormat(bible)
+    const [novelRow, knowledgeRow, bibleUi] = await Promise.all([
+      novelApi.getNovel(slug).catch(() => null),
+      knowledgeApi.getKnowledge(slug).catch(() => ({ premise_lock: '' })),
+      fetchBibleStateForPanel(slug),
+    ])
+
+    if (seq !== biblePanelLoadSeq || props.slug !== slug) return
+
+    let g = ''
+    let w = ''
+    if (novelRow) {
+      const parsed = parseGenreWorldFromPremise(novelRow.premise || '')
+      g = ((novelRow as any).locked_genre || '').trim() || parsed.genre
+      w = ((novelRow as any).locked_world_preset || '').trim() || parsed.worldPreset
+    }
+
+    const pl = typeof (knowledgeRow as any)?.premise_lock === 'string' ? (knowledgeRow as any).premise_lock : ''
+
+    lockedGenre.value = g
+    lockedWorld.value = w
+    state.value = bibleUi
+    premiseLock.value = pl
     syncJsonFromState()
   } catch (err: any) {
-    // If Bible doesn't exist, create it
-    if (err?.response?.status === 404) {
-      try {
-        await bibleApi.createBible(props.slug, `bible-${props.slug}`)
-        state.value = emptyState()
-        syncJsonFromState()
-      } catch {
-        message.error('创建设定失败')
-      }
-    } else {
-      message.error('加载设定失败')
+    if (seq !== biblePanelLoadSeq || props.slug !== slug) return
+    message.error(err?.response?.data?.detail || '加载设定失败')
+  } finally {
+    // 避免竞态 return 或异常路径未解除「表面待定」导致正文区 opacity:0 长期空白
+    if (seq === biblePanelLoadSeq && props.slug === slug) {
+      biblePanelDataReady.value = true
     }
   }
-  await loadPremiseLock()
 }
 
 const save = async () => {
@@ -384,7 +423,7 @@ const save = async () => {
       ...k,
       premise_lock: premiseLock.value.trim(),
     })
-    window.dispatchEvent(new CustomEvent('aitext:knowledge:reload'))
+    window.dispatchEvent(new CustomEvent('plotpilot:knowledge:reload'))
 
     message.success('设定与梗概锁定已保存')
     syncJsonFromState()
@@ -400,8 +439,8 @@ const generatePremiseKnowledge = async () => {
   try {
     const res = await knowledgeApi.generateKnowledge(props.slug)
     message.success(res.message || '梗概已生成')
-    await loadPremiseLock()
-    window.dispatchEvent(new CustomEvent('aitext:knowledge:reload'))
+    await load({ preserveSurface: true })
+    window.dispatchEvent(new CustomEvent('plotpilot:knowledge:reload'))
   } catch (e: any) {
     message.error(e?.response?.data?.detail || 'AI 生成失败，请确认 API Key 已配置')
   } finally {
@@ -416,7 +455,7 @@ const saveFromJson = async () => {
     const apiData = toApiFormat(payload)
     await bibleApi.updateBible(props.slug, apiData)
     message.success('设定已保存')
-    await load()
+    await load({ preserveSurface: true })
     showJsonModal.value = false
   } catch (e: any) {
     if (e instanceof SyntaxError) {
@@ -448,7 +487,7 @@ const generateBible = async () => {
   try {
     const res = await bibleApi.generateBible(props.slug)
     message.success(res.message || 'Bible 生成成功')
-    await load()
+    await load({ preserveSurface: true })
   } catch (e: any) {
     message.error(e?.response?.data?.detail || 'AI 生成失败，请确认 API Key 已配置')
   } finally {
@@ -457,17 +496,29 @@ const generateBible = async () => {
 }
 
 
+const BIBLE_PANEL_SOFT_RELOAD = 'plotpilot:bible-panel:soft-reload'
+
 watch(
-  () => props.slug,
+  () => [props.slug, props.reloadNonce] as const,
   () => {
+    const slug = (props.slug || '').trim()
+    if (!slug) return
     void load()
-  }
+  },
+  { immediate: true },
 )
 
 onMounted(() => {
-  void load()
-  void loadFingerprint()
+  window.addEventListener(BIBLE_PANEL_SOFT_RELOAD, onBiblePanelSoftReload as EventListener)
 })
+
+onUnmounted(() => {
+  window.removeEventListener(BIBLE_PANEL_SOFT_RELOAD, onBiblePanelSoftReload as EventListener)
+})
+
+function onBiblePanelSoftReload() {
+  if (props.slug) void load({ preserveSurface: true })
+}
 </script>
 
 <style scoped>
@@ -477,7 +528,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   padding: 0 12px 10px;
-  background: linear-gradient(165deg, #f8fafc 0%, #f1f5f9 55%, #eef2f7 100%);
+  background: linear-gradient(165deg, var(--app-surface-subtle) 0%, var(--app-border) 55%, var(--app-page-bg) 100%);
 }
 
 .bible-hero {
@@ -508,7 +559,7 @@ onMounted(() => {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #0f172a;
+  color: var(--app-text-primary);
 }
 
 .bible-badge {
@@ -529,7 +580,7 @@ onMounted(() => {
 }
 
 .bible-lead strong {
-  color: #334155;
+  color: var(--app-text-secondary);
   font-weight: 600;
 }
 
@@ -552,8 +603,8 @@ onMounted(() => {
   gap: 2px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(15, 23, 42, 0.06);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
 }
 
 .bible-role-item.bible-role-here {
@@ -570,7 +621,7 @@ onMounted(() => {
 
 .bible-role-v {
   font-size: 11px;
-  color: #334155;
+  color: var(--app-text-secondary);
   line-height: 1.4;
 }
 
@@ -581,12 +632,19 @@ onMounted(() => {
   gap: 6px 4px;
   font-size: 12px;
   color: #64748b;
+  min-height: 1.5em;
+}
+
+.bible-stat-placeholder {
+  color: rgba(100, 116, 139, 0.55);
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 .bible-stat em {
   font-style: normal;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--app-text-primary);
   margin-right: 2px;
 }
 
@@ -594,7 +652,7 @@ onMounted(() => {
   width: 3px;
   height: 3px;
   border-radius: 50%;
-  background: #cbd5e1;
+  background: var(--app-text-secondary, #cbd5e1);
   margin: 0 2px;
 }
 
@@ -613,6 +671,36 @@ onMounted(() => {
   min-height: 0;
 }
 
+.bible-scroll--surface-pending {
+  min-height: min(320px, 52vh);
+}
+
+/* 不再在加载时隐藏表单：opacity:0 曾与 load 竞态结合导致整页「空白」不可恢复 */
+.bible-scroll:not(.bible-scroll--surface-pending) .bible-form {
+  transition: opacity 0.12s ease-out;
+}
+
+.bible-card-creation-lock {
+  border: 1px solid var(--app-border, rgba(15, 23, 42, 0.1));
+}
+
+.bible-creation-lock-desc :deep(.n-descriptions-item__label) {
+  color: var(--app-text-secondary, #475569);
+}
+
+.bible-creation-lock-desc :deep(.n-descriptions-item__content) {
+  color: var(--app-text-primary, #111827);
+}
+
+.bible-style-full-collapse {
+  margin-top: 12px;
+}
+
+.bible-style-full-collapse :deep(.n-collapse-item__header) {
+  font-size: 12px;
+  color: var(--app-text-secondary, #475569);
+}
+
 .bible-form {
   padding: 14px 2px 24px;
   display: flex;
@@ -629,7 +717,7 @@ onMounted(() => {
   flex-shrink: 0;
   padding: 12px 16px;
   border-top: 1px solid rgba(15, 23, 42, 0.06);
-  background: #fafbfc;
+  background: var(--app-surface-subtle);
 }
 
 .bible-form {
@@ -649,7 +737,7 @@ onMounted(() => {
   border-radius: 12px !important;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   border: 1px solid rgba(15, 23, 42, 0.06) !important;
-  background: #fff !important;
+  background: var(--app-surface) !important;
 }
 
 .bible-card :deep(.n-card-header) {
@@ -742,7 +830,7 @@ onMounted(() => {
 .bcard-title {
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--app-text-primary);
   letter-spacing: 0.02em;
   margin-bottom: 4px;
 }
@@ -755,6 +843,11 @@ onMounted(() => {
 
 .bible-textarea :deep(textarea) {
   line-height: 1.55;
+}
+
+.bible-textarea-readonly :deep(textarea) {
+  cursor: default;
+  color: var(--app-text-secondary);
 }
 
 .char-block,

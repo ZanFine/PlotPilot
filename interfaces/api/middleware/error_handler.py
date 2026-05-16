@@ -9,7 +9,14 @@ from pydantic import ValidationError
 
 from ..responses import ErrorResponse
 
-logger = logging.getLogger("aitext.interfaces.api.middleware.error_handler")
+logger = logging.getLogger("plotpilot.interfaces.api.middleware.error_handler")
+
+
+# Starlette/FastAPI 版本兼容：新版常量名为 HTTP_422_UNPROCESSABLE_CONTENT
+try:
+    HTTP_422_STATUS = status.HTTP_422_UNPROCESSABLE_CONTENT
+except AttributeError:
+    HTTP_422_STATUS = 422  # 固定数值，永远不会弃用
 
 
 # Status code to error code mapping
@@ -19,7 +26,7 @@ STATUS_CODE_MAP: Dict[int, str] = {
     status.HTTP_403_FORBIDDEN: "FORBIDDEN",
     status.HTTP_404_NOT_FOUND: "NOT_FOUND",
     status.HTTP_409_CONFLICT: "CONFLICT",
-    status.HTTP_422_UNPROCESSABLE_CONTENT: "UNPROCESSABLE_ENTITY",
+    HTTP_422_STATUS: "UNPROCESSABLE_ENTITY",
     status.HTTP_500_INTERNAL_SERVER_ERROR: "INTERNAL_ERROR",
 }
 
@@ -90,7 +97,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         logger.debug(f"  - {field_error['field']}: {field_error['message']}")
 
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=HTTP_422_STATUS,
         content=error_response.model_dump()
     )
 

@@ -15,31 +15,24 @@
       />
     </div>
 
-    <n-empty
-      v-else-if="!loading"
-      :description="structureEmptyDescription"
-      class="structure-empty"
-    >
-      <template #extra>
-        <n-space vertical :size="8" align="center">
-          <n-button v-if="autopilotEmptyMode" type="primary" @click="loadTree">
-            刷新结构树
-          </n-button>
-          <n-button
-            v-if="!autopilotEmptyMode"
-            type="primary"
-            @click="emit('openPlanModal')"
-          >
-            🎯 启动结构规划
-          </n-button>
-          <n-button v-else secondary size="small" @click="emit('openPlanModal')">
-            手动打开结构规划…
-          </n-button>
-        </n-space>
-      </template>
-    </n-empty>
-
-    <n-spin v-if="loading" class="structure-loading" />
+    <div v-else class="structure-empty-wrap">
+      <n-empty
+        :description="structureEmptyDescription"
+        class="structure-empty"
+      >
+        <template #extra>
+          <n-space vertical :size="8" align="center">
+            <n-spin v-if="loading" size="small" />
+            <n-button v-if="autopilotEmptyMode" type="primary" @click="loadTree">
+              刷新结构树
+            </n-button>
+            <n-alert v-else type="info" :show-icon="false" style="font-size: 12px; max-width: 240px; text-align: center;">
+              <strong>提示</strong>：切换到「托管撰稿」模式，点击「启动全托管」即可自动生成大纲与正文
+            </n-alert>
+          </n-space>
+        </template>
+      </n-empty>
+    </div>
 
     <!-- 右键菜单 -->
     <n-dropdown
@@ -84,6 +77,7 @@ import { ref, computed, h, onMounted, watch } from 'vue'
 import { NTree, NEmpty, NSpin, NTag, NButton, NSpace, NDropdown, NModal, NInput, useMessage, useDialog } from 'naive-ui'
 import { structureApi, type StoryNode } from '@/api/structure'
 import { chapterApi } from '@/api/chapter'
+import { resolveHttpUrl } from '@/api/config'
 
 const props = defineProps<{
   slug: string
@@ -101,18 +95,25 @@ const message = useMessage()
 const dialog = useDialog()
 
 const loading = ref(false)
-/** 全托管时空侧栏提示：避免与「启动结构规划」主按钮混淆 */
+/** 并发 loadTree 时用深度计数维护 loading，避免先结束的请求把 loading 关掉导致空态与 spin 来回闪 */
+let loadTreeDepth = 0
+/** 只采纳最近一次 loadTree 的响应，避免慢请求覆盖新数据造成树/空态来回切 */
+let loadTreeRequestId = 0
+/** 全托管时空侧栏提示：引导用户使用全托管 */
 const autopilotEmptyMode = ref<null | 'planning' | 'review'>(null)
 const structureEmptyDescription = computed(() => {
+  if (loading.value && autopilotEmptyMode.value == null) {
+    return '正在加载叙事结构…'
+  }
   if (autopilotEmptyMode.value === 'planning') {
     return '全托管正在生成部-卷-幕结构，请稍候后点击「刷新结构树」'
   }
   if (autopilotEmptyMode.value === 'review') {
     return '待审阅状态下若结构未显示，请点「刷新结构树」并确认守护进程已运行'
   }
-  return '暂无叙事结构'
+  return '暂无叙事结构，请使用「全托管」自动生成'
 })
-const treeData = ref<StoryNode[]>([])
+const treeData = ref<any[]>([])
 const selectedKeys = ref<string[]>([])
 const expandedKeys = ref<string[]>([])
 
@@ -152,16 +153,16 @@ const menuOptions = computed(() => {
     { label: '重命名', key: 'rename' },
   ]
   if (node.node_type === 'part') {
-    items.push({ label: '➕ 添加卷', key: 'add-child' })
+    items.push({ label: '添加卷', key: 'add-child' })
   } else if (node.node_type === 'volume') {
-    items.push({ label: '➕ 添加幕', key: 'add-child' })
+    items.push({ label: '添加幕', key: 'add-child' })
   } else if (node.node_type === 'act') {
-    items.push({ label: '➕ 添加章节（手动）', key: 'add-child' })
+    items.push({ label: '添加章节（手动）', key: 'add-child' })
     items.push({ type: 'divider', key: 'div' })
-    items.push({ label: '🤖 AI 规划章节', key: 'plan-act' })
+    items.push({ label: 'AI 规划章节', key: 'plan-act' })
   }
   items.push({ type: 'divider', key: 'div-del' })
-  items.push({ label: '🗑 删除', key: 'delete' })
+  items.push({ label: '删除', key: 'delete' })
   return items
 })
 
@@ -228,39 +229,54 @@ const collectNonChapterKeys = (nodes: StoryNode[]): string[] => {
   return keys
 }
 
+function isAutopilotMacroPlanningStage(s: Record<string, unknown>): boolean {
+  const stage = String(s.current_stage ?? '').toLowerCase()
+  const sub = String(s.writing_substep ?? '').toLowerCase()
+  return (
+    stage === 'macro_planning' ||
+    stage === 'planning' ||
+    sub === 'macro_planning'
+  )
+}
+
 async function syncAutopilotEmptyHint(hasTreeData: boolean) {
   if (hasTreeData) {
     autopilotEmptyMode.value = null
     return
   }
   try {
-    const r = await fetch(`/api/v1/autopilot/${props.slug}/status`)
+    const r = await fetch(resolveHttpUrl(`/api/v1/autopilot/${props.slug}/status`))
     if (!r.ok) {
       autopilotEmptyMode.value = null
       return
     }
-    const s = await r.json()
+    const s = (await r.json()) as Record<string, unknown>
     if (s.autopilot_status !== 'running') {
       autopilotEmptyMode.value = null
       return
     }
-    if (s.current_stage === 'macro_planning') {
+    if (isAutopilotMacroPlanningStage(s)) {
       autopilotEmptyMode.value = 'planning'
-    } else if (s.needs_review || s.current_stage === 'paused_for_review') {
+    } else if (s.needs_review === true || String(s.current_stage ?? '').toLowerCase() === 'paused_for_review') {
       autopilotEmptyMode.value = 'review'
     } else {
       autopilotEmptyMode.value = null
     }
   } catch {
-    autopilotEmptyMode.value = null
+    /* 网络抖动时不清空已有提示，避免按钮/文案来回闪 */
   }
 }
 
 const loadTree = async () => {
+  const reqId = ++loadTreeRequestId
+  loadTreeDepth++
   loading.value = true
   try {
     const res = await structureApi.getTree(props.slug)
-    const nodes = res.tree?.nodes || []
+    if (reqId !== loadTreeRequestId) {
+      return
+    }
+    const nodes = Array.isArray(res.tree) ? res.tree : (res.tree?.nodes ?? [])
     treeData.value = nodes.length > 0 ? nodes.map(convertToTreeNode) : []
 
     // 自动展开所有非章节节点
@@ -270,11 +286,17 @@ const loadTree = async () => {
     emit('treeLoaded', hasData)
     await syncAutopilotEmptyHint(hasData)
   } catch (e: any) {
+    if (reqId !== loadTreeRequestId) {
+      return
+    }
     message.error(e?.response?.data?.detail || '加载结构失败')
     emit('treeLoaded', false)
     autopilotEmptyMode.value = null
   } finally {
-    loading.value = false
+    loadTreeDepth--
+    if (loadTreeDepth === 0) {
+      loading.value = false
+    }
   }
 }
 
@@ -404,7 +426,7 @@ const doAddChild = async () => {
 }
 
 // 渲染节点标签
-const renderLabel = ({ option }: { option: StoryNode }) => {
+const renderLabel = ({ option }: { option: any }) => {
   const elements: any[] = [
     h('span', { class: 'node-icon' }, option.icon),
     h('span', { class: 'node-title' }, option.display_name),
@@ -426,32 +448,40 @@ const renderLabel = ({ option }: { option: StoryNode }) => {
 }
 
 // 渲染节点后缀
-const renderSuffix = ({ option }: { option: StoryNode }) => {
+const renderSuffix = ({ option }: { option: any }) => {
   const elements: any[] = []
-  if (option.description && ['part', 'volume', 'act'].includes(option.node_type)) {
+  const node = option as StoryNode
+  // 「幕」节点仅显示标题（如第 n 幕），不显示后端附带的内容小结，避免树形一行过长
+  if (
+    node.description &&
+    ['part', 'volume'].includes(node.node_type)
+  ) {
     elements.push(
       h('span', {
         class: 'node-description',
         style: { color: '#999', fontSize: '12px', marginLeft: '8px' },
-      }, option.description)
+      }, node.description)
     )
   }
-  if (option.node_type === 'chapter' && option.word_count) {
-    elements.push(h('span', { class: 'node-range' }, `${option.word_count}字`))
+  if (node.node_type === 'chapter' && node.word_count) {
+    elements.push(h('span', { class: 'node-range' }, `${node.word_count}字`))
   }
-  if (option.chapter_start && option.chapter_end) {
+  if (node.chapter_start && node.chapter_end) {
     elements.push(
-      h('span', { class: 'node-range' }, `${option.chapter_start}-${option.chapter_end}章 (${option.chapter_count})`)
+      h('span', { class: 'node-range' }, `${node.chapter_start}-${node.chapter_end}章 (${node.chapter_count})`)
     )
   }
   return elements.length > 0 ? h('span', {}, elements) : null
 }
 
 // 节点属性（右键绑定）
-const nodeProps = ({ option }: { option: StoryNode }) => ({
-  class: `node-level-${option.level}`,
-  onContextmenu: (e: MouseEvent) => handleContextMenu(e, option),
-})
+const nodeProps = ({ option }: { option: any }) => {
+  const node = option as StoryNode
+  return {
+    class: `node-level-${node.level}`,
+    onContextmenu: (e: MouseEvent) => handleContextMenu(e, node),
+  }
+}
 
 onMounted(() => { loadTree() })
 
@@ -469,12 +499,11 @@ defineExpose({ loadTree })
   flex: 1;
   overflow: auto;
 }
-.structure-empty {
-  padding: 40px 0;
+.structure-empty-wrap {
+  flex: 1;
+  min-height: 0;
 }
-.structure-loading {
-  display: flex;
-  justify-content: center;
+.structure-empty {
   padding: 40px 0;
 }
 .node-label {

@@ -31,8 +31,12 @@ STYLE_DIMENSIONS = [
     "sentence_variety",     # 句式变化：0-1
 ]
 
-# 风格分析 Prompt（中文）
-STYLE_ANALYSIS_PROMPT = """你是专业的小说风格分析师。请分析以下章节的写作风格特征。
+# CPMS: 提示词节点 key
+_STYLE_ANALYSIS_NODE_KEY = "voice-style-analysis"
+_BASELINE_ANALYSIS_NODE_KEY = "voice-baseline-analysis"
+
+# 硬编码回退（仅在 PromptRegistry 不可用时使用）
+_FALLBACK_STYLE_ANALYSIS_PROMPT = """你是专业的小说风格分析师。请分析以下章节的写作风格特征。
 
 ## 分析要求
 输出 JSON 格式，包含以下维度（每项 0-1 分）：
@@ -52,8 +56,7 @@ STYLE_ANALYSIS_PROMPT = """你是专业的小说风格分析师。请分析以�
 只输出 JSON，不要其他文字：
 {{"narrative_voice": 0.5, "dialogue_ratio": 0.3, "description_depth": 0.7, "emotional_intensity": 0.6, "pacing": 0.4, "sensory_richness": 0.5, "metaphor_usage": 0.3, "sentence_variety": 0.6}}"""
 
-# 基准风格提取 Prompt（从多章节中提取平均风格）
-BASELINE_PROMPT = """你是专业的小说风格分析师。请根据以下章节风格数据，提取这本小说的基准写作风格。
+_FALLBACK_BASELINE_PROMPT = """你是专业的小说风格分析师。请根据以下章节风格数据，提取这本小说的基准写作风格。
 
 ## 已分析章节的风格数据
 {style_data}
@@ -75,6 +78,61 @@ class LLMVoiceAnalysisService:
         self._llm = llm_service
         # 缓存已分析的章节风格
         self._cache: Dict[str, Dict[str, float]] = {}
+
+    # ─── CPMS 提示词获取 ───
+
+    @staticmethod
+    def _get_system_prompt(node_key: str, fallback: str = "") -> str:
+        """通过 PromptRegistry 获取 system prompt，不可用时回退。"""
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            system = registry.get_system(node_key)
+            if system:
+                return system
+        except Exception as exc:
+            logger.debug("PromptRegistry 不可用 (%s): %s", node_key, exc)
+        return fallback
+
+    @staticmethod
+    def _get_style_analysis_user(content: str) -> str:
+        """构建风格分析 user prompt。CPMS 优先。"""
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            node = registry.get_node(_STYLE_ANALYSIS_NODE_KEY)
+            if node and node.get_active_user_template():
+                from infrastructure.ai.prompt_template_engine import get_template_engine
+                engine = get_template_engine()
+                result = engine.render(
+                    user_template=node.get_active_user_template(),
+                    variables={"content": content},
+                )
+                if result and result.user:
+                    return result.user
+        except Exception as exc:
+            logger.debug("PromptRegistry 渲染风格分析 user 失败: %s", exc)
+        return _FALLBACK_STYLE_ANALYSIS_PROMPT.format(content=content)
+
+    @staticmethod
+    def _get_baseline_user(style_data: str) -> str:
+        """构建基准风格提取 user prompt。CPMS 优先。"""
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            node = registry.get_node(_BASELINE_ANALYSIS_NODE_KEY)
+            if node and node.get_active_user_template():
+                from infrastructure.ai.prompt_template_engine import get_template_engine
+                engine = get_template_engine()
+                result = engine.render(
+                    user_template=node.get_active_user_template(),
+                    variables={"style_data": style_data},
+                )
+                if result and result.user:
+                    return result.user
+        except Exception as exc:
+            logger.debug("PromptRegistry 渲染基准分析 user 失败: %s", exc)
+        return _FALLBACK_BASELINE_PROMPT.format(style_data=style_data)
 
     async def analyze_chapter_style(
         self,
@@ -101,8 +159,8 @@ class LLMVoiceAnalysisService:
 
         try:
             prompt = Prompt(
-                system="你是专业的小说风格分析师，输出纯 JSON 格式。",
-                user=STYLE_ANALYSIS_PROMPT.format(content=snippet)
+                system=self._get_system_prompt(_STYLE_ANALYSIS_NODE_KEY, "你是专业的小说风格分析师，输出纯 JSON 格式。"),
+                user=self._get_style_analysis_user(content=snippet)
             )
             config = GenerationConfig(max_tokens=200, temperature=0.1)
 
@@ -167,8 +225,8 @@ class LLMVoiceAnalysisService:
                 style_data.append(f"章节{i+1}: {json.dumps(clean_vec, ensure_ascii=False)}")
 
             prompt = Prompt(
-                system="你是专业的小说风格分析师，输出纯 JSON 格式。",
-                user=BASELINE_PROMPT.format(style_data="\n".join(style_data))
+                system=self._get_system_prompt(_BASELINE_ANALYSIS_NODE_KEY, "你是专业的小说风格分析师，输出纯 JSON 格式。"),
+                user=self._get_baseline_user(style_data="\n".join(style_data))
             )
             config = GenerationConfig(max_tokens=300, temperature=0.1)
 
@@ -256,7 +314,7 @@ class LLMVoiceAnalysisService:
                         val = data.get(dim, 0.5)
                         result[dim] = max(0.0, min(1.0, float(val)))
                     return result
-                except:
+                except (json.JSONDecodeError, ValueError):
                     pass
             return self._get_neutral_style(0)
 
@@ -278,7 +336,7 @@ class LLMVoiceAnalysisService:
                         "baseline": data.get("baseline", {}),
                         "tolerance": data.get("tolerance", {}),
                     }
-                except:
+                except (json.JSONDecodeError, ValueError):
                     pass
             return self._get_default_baseline()
 

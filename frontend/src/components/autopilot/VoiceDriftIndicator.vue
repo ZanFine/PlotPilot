@@ -88,6 +88,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { resolveHttpUrl } from '@/api/config'
 
 interface VoiceDriftData {
   drift_score: number
@@ -105,6 +106,7 @@ const props = defineProps<{
   novelId: string
   safeThreshold?: number  // 安全阈值，默认 3.0
   dangerThreshold?: number  // 危险阈值，默认 6.0
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const emit = defineEmits<{
@@ -188,7 +190,9 @@ const driftDetails = computed(() => driftData.value?.details ?? [])
 async function loadDriftData() {
   loading.value = true
   try {
-    const res = await fetch(`/api/v1/novels/${props.novelId}/monitor/voice-drift`)
+    const res = await fetch(
+      resolveHttpUrl(`/api/v1/novels/${props.novelId}/monitor/voice-drift`),
+    )
     if (res.ok) {
       const dataArray = await res.json()
       // 取第一个角色的数据（或者可以聚合多个角色）
@@ -255,6 +259,11 @@ function stopPolling() {
 watch(() => props.novelId, () => {
   stopPolling()
   startPolling()
+})
+
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadDriftData()
 })
 
 // 生命周期

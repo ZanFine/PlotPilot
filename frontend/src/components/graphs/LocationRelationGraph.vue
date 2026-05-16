@@ -203,11 +203,8 @@ const reload = async () => {
   try {
     const res = await knowledgeApi.getKnowledge(props.slug)
     facts.value = (res.facts || []) as Fact[]
-    console.log('[LocationRelationGraph] Total facts:', facts.value.length)
     const locationFacts = facts.value.filter(f => f.entity_type === 'location')
-    console.log('[LocationRelationGraph] Location facts:', locationFacts.length, locationFacts)
     await redraw()
-    console.log('[LocationRelationGraph] Graph data:', graphData.value)
   } catch (error) {
     console.error('Failed to load location graph:', error)
     window.$message?.error('加载地点关系图失败，请稍后重试')
@@ -218,7 +215,6 @@ const reload = async () => {
 }
 
 const handleNodeClick = (node: EChartsNode) => {
-  console.log('Clicked location:', node)
   emit('nodeClick', node)
 }
 
@@ -248,9 +244,9 @@ defineExpose({ reload })
   display: flex;
   flex-direction: column;
   position: relative;
-  background: #fafafa;
+  background: var(--app-surface-subtle);
   border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  border: 1px solid var(--app-border-strong);
   overflow: hidden;
 }
 
@@ -261,8 +257,8 @@ defineExpose({ reload })
   align-items: flex-start;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
-  background: #fff;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface);
 }
 
 .lrg-hint {

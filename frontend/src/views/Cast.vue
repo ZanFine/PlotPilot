@@ -465,7 +465,7 @@ onUnmounted(() => {
   gap: 12px;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--app-border);
-  background: #fff;
+  background: var(--app-surface);
 }
 
 .cast-title {
@@ -488,7 +488,7 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  background: #fafafa;
+  background: var(--app-surface-subtle);
   border-right: 1px solid var(--app-border);
 }
 
@@ -497,7 +497,7 @@ onUnmounted(() => {
   flex-shrink: 0;
   padding: 12px;
   overflow: auto;
-  background: #fff;
+  background: var(--app-surface);
 }
 
 .side-form {

@@ -5,14 +5,18 @@
   严格解析（等价于「执行 tool 参数校验」）。日后 provider 支持 function calling 时，可把
   `initial_knowledge_openai_function_tool()` 交给网关，参数形状保持一致。
 - **禁止多余字段**：`extra='forbid'`，丢弃模型捏造的 `provenance`、`source_type`（写入时由服务端统一标为 ai_generated）等。
+
+CPMS 改造：system prompt 不再硬编码，通过 PromptRegistry 从数据库读取。
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
-from application.ai.llm_json_extract import parse_llm_json_to_dict
+from application.ai.llm_json_extract import parse_llm_json_to_dict  # noqa: F401 — 保留向后兼容（外部可能 import）
 
 # ---------------------------------------------------------------------------
 # 与 LLM 约定的形状（字段越少越好，其余由持久化层补全）
@@ -49,9 +53,11 @@ class LlmInitialKnowledgePayload(BaseModel):
 # 提示词（角色 + 契约说明；与校验模型同源维护）
 # ---------------------------------------------------------------------------
 
-_INITIAL_KNOWLEDGE_INSTRUCTIONS = """你是专业的小说知识图谱构建助手。根据小说标题和设定，生成核心知识。
+# CPMS: 提示词节点 key（对应 prompts_extraction.json 中的条目）
+_KNOWLEDGE_NODE_KEY = "initial-knowledge-extraction"
 
-**只输出一个 JSON 对象，不要 markdown 代码块、不要前后解释文字。**
+# 硬编码回退（仅在 PromptRegistry 不可用时使用）
+_FALLBACK_INITIAL_KNOWLEDGE_SYSTEM = """你是专业的小说知识图谱构建助手。根据小说标题和设定，生成核心知识。
 
 **字段契约（多一字段即非法，不要输出 provenance、source_type、chapter_element_id 等）：**
 - premise_lock: string，一句话核心梗概（约 50～100 字）
@@ -60,12 +66,35 @@ _INITIAL_KNOWLEDGE_INSTRUCTIONS = """你是专业的小说知识图谱构建助�
 - object 为宾语字符串（JSON 键名必须是 "object"）
 - 提取 5～10 条核心设定三元组：主要角色身份、核心地点、关键规则/能力；只写确定设定，不要推测
 
-**source_type、推断溯源由服务端写入；模型不要编造。**"""
+**source_type、推断溯源由服务端写入；模型不要编造。**
+
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+{
+    "premise_lock": "",
+    "facts": []
+}
+```
+"""
 
 
 def build_initial_knowledge_system_prompt() -> str:
-    """供 AutoKnowledgeGenerator 等拼接 system prompt（单一真源）。"""
-    return _INITIAL_KNOWLEDGE_INSTRUCTIONS
+    """供 AutoKnowledgeGenerator 等拼接 system prompt。
+
+    CPMS: 优先从 PromptRegistry 获取（广场可编辑），
+    如果 Registry 不可用则回退到硬编码默认值。
+    """
+    try:
+        from infrastructure.ai.prompt_registry import get_prompt_registry
+        registry = get_prompt_registry()
+        system = registry.get_system(_KNOWLEDGE_NODE_KEY)
+        if system:
+            return system
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).debug("PromptRegistry 不可用，使用回退提示词: %s", exc)
+
+    return _FALLBACK_INITIAL_KNOWLEDGE_SYSTEM
 
 
 def initial_knowledge_openai_function_tool() -> Dict[str, Any]:
@@ -89,13 +118,30 @@ def initial_knowledge_openai_function_tool() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def parse_json_from_response(rsp: str):
+    """从LLM响应中解析JSON。
+
+    🔥 已废弃：此函数是旧版简易 JSON 解析器，无法处理 DeepSeek 等模型的
+    中文引号、思考链、截断输出等问题。
+    请使用 parse_llm_json_to_dict() 或 structured_json_generate()。
+    保留此函数仅为向后兼容（setup_main_plot_suggestion_service 等仍在引用）。
+    """
+    data, errs = parse_llm_json_to_dict(rsp)
+    if data is not None:
+        return data
+    # 兼容旧调用方：抛出 JSONDecodeError
+    raise json.JSONDecodeError(errs[0] if errs else "parse failed", rsp, 0)
+
+
 def parse_initial_knowledge_llm_response(
     raw: str,
 ) -> Tuple[Optional[LlmInitialKnowledgePayload], List[str]]:
     """解析并校验 LLM 返回文本。成功返回 (payload, [])；失败返回 (None, [人类可读错误…])。"""
+    # 🔥 使用统一管线（json_repair + 思考链清洗）
     data, errs = parse_llm_json_to_dict(raw)
     if data is None:
         return None, errs
+
     try:
         payload = LlmInitialKnowledgePayload.model_validate(data)
         return payload, []

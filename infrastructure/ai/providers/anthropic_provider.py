@@ -1,20 +1,54 @@
 """Anthropic LLM 提供商实现"""
 import json
 import logging
-import os
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
+
 import httpx
 from anthropic import Anthropic, AsyncAnthropic
+
+from domain.ai.services.llm_service import GenerationConfig, GenerationResult
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.value_objects.token_usage import TokenUsage
-from domain.ai.services.llm_service import GenerationConfig, GenerationResult
 from infrastructure.ai.config.settings import Settings
 from .base import BaseProvider
+from .model_resolution import require_resolved_model_id
 
 logger = logging.getLogger(__name__)
 
-# 从环境变量读取模型配置，默认使用 claude-sonnet-4-6
-DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+def _extract_text_from_content_block(block: Any) -> str:
+    """尽量从兼容端点返回的 content block 中提取文本。"""
+    if block is None:
+        return ""
+
+    if isinstance(block, str):
+        return block
+
+    text = getattr(block, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text
+
+    if isinstance(block, dict):
+        for key in ("text", "content", "value"):
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        if block.get("type") == "json" and block.get("json") is not None:
+            try:
+                return json.dumps(block["json"], ensure_ascii=False)
+            except Exception:
+                return str(block["json"])
+
+    block_type = getattr(block, "type", None)
+    if block_type in {"json", "input_json", "output_json"}:
+        json_payload = getattr(block, "json", None)
+        if json_payload is not None:
+            try:
+                return json.dumps(json_payload, ensure_ascii=False)
+            except Exception:
+                return str(json_payload)
+
+    return ""
 
 
 class AnthropicProvider(BaseProvider):
@@ -41,23 +75,50 @@ class AnthropicProvider(BaseProvider):
         if not settings.api_key:
             raise ValueError("API key is required for AnthropicProvider")
 
-        # 官方 SDK 客户端 - 不设置 base_url，直接走官方 API (HTTPS)
-        # 用于 generate() (规划/分析等场景)
+        # 归一化 base_url：去掉尾部 /v1（SDK 内部会自动拼 /v1/messages）
+        base = settings.base_url.rstrip("/") if settings.base_url else None
+        if base and base.endswith("/v1"):
+            base = base[:-3]
+
         official_client_kw = {
             "api_key": settings.api_key,
-            "timeout": 300.0,  # 5分钟超时
-            "max_retries": 5,  # 增加重试次数
+            "timeout": 300.0,  # 5 分钟超时
+            "max_retries": 2,
             "default_headers": {
                 "User-Agent": "claude-cli/2.1.87 (external, cli)",
+                **(settings.extra_headers or {}),
             },
+            "default_query": settings.extra_query or None,
         }
-        self.client = Anthropic(**official_client_kw)
-        self.async_client = AsyncAnthropic(**official_client_kw)
+        if base:
+            official_client_kw["base_url"] = base
 
-        # 代理地址 - 用于 stream_generate() (正文生成)
-        # 如果设置了 base_url，则使用代理；否则回退到官方 API
-        self.proxy_base_url = settings.base_url
+        # SDK 内置 httpx 默认 trust_env=True，会走系统 HTTP(S)_PROXY，本机代理 TLS 常导致 ConnectError。
+        # 🔥 分层超时：避免 API 卡住时整个进程挂起
+        _sdk_timeout = httpx.Timeout(
+            connect=settings.connect_timeout,
+            read=settings.read_timeout,
+            write=60.0,
+            pool=30.0,
+        )
+        self._http_client_sync = httpx.Client(timeout=_sdk_timeout, trust_env=False)
+        self._http_client_async = httpx.AsyncClient(timeout=_sdk_timeout, trust_env=False)
+        self.client = Anthropic(**official_client_kw, http_client=self._http_client_sync)
+        self.async_client = AsyncAnthropic(**official_client_kw, http_client=self._http_client_async)
 
+        # 流式端点专用 httpx client（长生命周期，跨请求复用连接池）
+        self._stream_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=self.settings.connect_timeout,
+                read=self.settings.read_timeout,
+                write=60.0,
+                pool=30.0,
+            ),
+            trust_env=False,
+        )
+
+        # 兼容旧字段：若其他模块引用，保留归一化后的值
+        self.proxy_base_url = base
     async def generate(
         self,
         prompt: Prompt,
@@ -76,21 +137,50 @@ class AnthropicProvider(BaseProvider):
             RuntimeError: 当 API 调用失败或返回空内容时
         """
         try:
-            # 使用 async_client 避免阻塞 asyncio 事件循环
-            response = await self.async_client.messages.create(
-                model=config.model or DEFAULT_MODEL,
-                temperature=config.temperature,
-                max_tokens=config.max_tokens,
-                system=prompt.system,
-                messages=prompt.to_messages()
+            model_id = require_resolved_model_id(
+                config.model,
+                self.settings.default_model,
+                provider_label="Anthropic / Claude",
             )
+            # 构建请求参数
+            create_kwargs = {
+                "model": model_id,
+                "temperature": config.temperature,
+                "max_tokens": config.max_tokens,
+                "system": prompt.system,
+                "messages": [{"role": "user", "content": prompt.user}],
+            }
+            # 🔥 response_format 自适应：
+            # Anthropic 原生支持 json_schema 格式的 response_format（2024+），
+            # 但通过兼容网关（如智谱 Anthropic 兼容端点）可能不支持。
+            # 安全策略：只传递 Anthropic 原生格式的 response_format
+            if config.response_format:
+                fmt = config.response_format
+                # OpenAI 格式 → Anthropic 格式自动转换
+                if fmt.get("type") == "json_object":
+                    # Anthropic 没有 json_object，但可以通过 prompt 约束
+                    # 在 system prompt 末尾追加 JSON 输出提示
+                    create_kwargs["system"] = create_kwargs["system"] + "\n\n请只输出有效的 JSON 对象，不要包含其他文字。"
+                elif fmt.get("type") == "json_schema":
+                    # Anthropic 支持 json_schema（需要 API 版本 2024+）
+                    create_kwargs["response_format"] = fmt
+
+            # 使用 async_client 避免阻塞 asyncio 事件循环
+            response = await self.async_client.messages.create(**create_kwargs)
 
             # 防御性检查：验证 content 列表非空
             if not response.content:
                 raise RuntimeError("API returned empty content")
 
-            # 提取响应内容
-            content = response.content[0].text
+            parts = []
+            for block in response.content:
+                text = _extract_text_from_content_block(block)
+                if text:
+                    parts.append(text)
+
+            content = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+            if not content:
+                raise RuntimeError("API returned no text content")
 
             # 创建 token 使用统计
             token_usage = TokenUsage(
@@ -115,8 +205,7 @@ class AnthropicProvider(BaseProvider):
         直接使用 httpx 解析 SSE 流，走代理服务器（如果配置了 base_url）。
         用于正文生成场景，支持 HTTP 代理。
         """
-        # 使用代理地址（如果有配置），否则回退官方 API
-        base_url = self.proxy_base_url or "https://api.anthropic.com"
+        base_url = self.settings.base_url or "https://api.anthropic.com"
         url = f"{base_url}/v1/messages"
         logger.debug(f"[Stream] Using endpoint: {url}")
 
@@ -127,36 +216,49 @@ class AnthropicProvider(BaseProvider):
             "Accept": "text/event-stream",
             # 伪造 User-Agent 模拟 claude-cli
             "User-Agent": "claude-cli/2.1.87 (external, cli)",
+            **(self.settings.extra_headers or {}),
         }
 
+        model_id = require_resolved_model_id(
+            config.model,
+            self.settings.default_model,
+            provider_label="Anthropic / Claude",
+        )
         payload = {
-            "model": config.model or DEFAULT_MODEL,
+            "model": model_id,
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
             "system": prompt.system,
             "messages": [{"role": "user", "content": prompt.user}],
             "stream": True,
         }
+        payload.update(self.settings.extra_body or {})
 
         logger.debug(f"[Stream] Calling {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    if response.status_code != 200:
-                        error_body = await response.aread()
-                        raise RuntimeError(f"API error {response.status_code}: {error_body.decode()}")
+            # 使用长生命周期 client（跨请求复用连接池，避免每次 stream_generate 重建 TCP+TLS）
+            async with self._stream_http_client.stream(
+                "POST",
+                url,
+                headers=headers,
+                params=self.settings.extra_query or None,
+                json=payload,
+            ) as response:
+                if response.status_code != 200:
+                    error_body = await response.aread()
+                    raise RuntimeError(f"API error {response.status_code}: {error_body.decode()}")
 
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
 
-                        # 解析 SSE 事件
-                        while "\n\n" in buffer:
-                            event_text, buffer = buffer.split("\n\n", 1)
-                            text_content = self._parse_sse_event(event_text)
-                            if text_content:
-                                yield text_content
+                    # 解析 SSE 事件
+                    while "\n\n" in buffer:
+                        event_text, buffer = buffer.split("\n\n", 1)
+                        text_content = self._parse_sse_event(event_text)
+                        if text_content:
+                            yield text_content
 
         except Exception as e:
             logger.error(f"[Stream] Failed: {e}")

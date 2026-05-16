@@ -1,6 +1,6 @@
 """AI 配置设置"""
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 
 @dataclass
@@ -10,12 +10,23 @@ class Settings:
     管理 LLM 提供商的配置参数。
     """
 
-    default_model: str = "claude-3-5-sonnet-20241022"
+    default_model: str = ""
     default_temperature: float = 0.7
     default_max_tokens: int = 4096
     api_key: Optional[str] = None
-    #: 兼容自建/转发网关，与官方 ANTHROPIC_BASE_URL 一致；未设则走官方默认
+    #: 兼容自建/转发网关，与官方 provider base_url 一致；未设则走官方默认
     base_url: Optional[str] = None
+    timeout_seconds: float = 300.0
+    #: 连接超时（秒）：建立 TCP 连接的最大等待时间。设短可快速发现网络不可达
+    connect_timeout: float = 30.0
+    #: 读取超时（秒）：等待服务端响应（首个字节）的最大时间。流式场景下指两个 chunk 之间的间隔
+    read_timeout: float = 120.0
+    extra_headers: dict[str, str] = field(default_factory=dict)
+    extra_query: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    provider_name: Optional[str] = None
+    protocol: Optional[str] = None
+    use_legacy_chat_completions: bool = False
 
     def __post_init__(self):
         """验证配置参数"""
@@ -24,3 +35,10 @@ class Settings:
 
         if self.default_max_tokens <= 0:
             raise ValueError("Max tokens must be positive")
+
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if self.connect_timeout <= 0:
+            raise ValueError("connect_timeout must be positive")
+        if self.read_timeout <= 0:
+            raise ValueError("read_timeout must be positive")

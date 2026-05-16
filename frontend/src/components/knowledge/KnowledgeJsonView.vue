@@ -95,11 +95,11 @@ const handleReloadEvent = () => {
 
 onMounted(() => {
   reload()
-  window.addEventListener('aitext:knowledge:reload', handleReloadEvent)
+  window.addEventListener('plotpilot:knowledge:reload', handleReloadEvent)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('aitext:knowledge:reload', handleReloadEvent)
+  window.removeEventListener('plotpilot:knowledge:reload', handleReloadEvent)
 })
 </script>
 
@@ -114,8 +114,8 @@ onUnmounted(() => {
 
 .kjv-toolbar {
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-  background: #fafafa;
+  border-bottom: 1px solid var(--app-divider);
+  background: var(--app-surface-subtle);
   flex-shrink: 0;
 }
 

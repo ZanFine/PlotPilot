@@ -12,7 +12,6 @@ from domain.ai.services.llm_service import LLMService
 
 if TYPE_CHECKING:
     from application.engine.services.scene_director_service import SceneDirectorService
-    from infrastructure.ai.qdrant_vector_store import QdrantVectorStore
 
 from application.paths import DATA_DIR
 from infrastructure.persistence.storage.file_storage import FileStorage
@@ -29,8 +28,10 @@ from infrastructure.persistence.database.story_node_repository import StoryNodeR
 from infrastructure.persistence.database.sqlite_cast_repository import SqliteCastRepository
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
 from infrastructure.persistence.database.sqlite_timeline_repository import SqliteTimelineRepository
-from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
+from infrastructure.persistence.database.sqlite_confluence_point_repository import SqliteConfluencePointRepository
 from infrastructure.ai.config.settings import Settings
+from infrastructure.ai.provider_factory import DynamicLLMService, LLMProviderFactory
+from application.ai.llm_control_service import LLMControlService
 
 from application.core.services.novel_service import NovelService
 from application.core.services.chapter_service import ChapterService
@@ -85,7 +86,11 @@ def _anthropic_settings(require_key: bool = True) -> Optional[Settings]:
                 "Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (optional: ANTHROPIC_BASE_URL)"
             )
         return None
-    return Settings(api_key=key, base_url=_anthropic_base_url())
+    return Settings(
+        api_key=key,
+        base_url=_anthropic_base_url(),
+        default_model=os.getenv("WRITING_MODEL", ""),
+    )
 
 
 def _openai_api_key() -> Optional[str]:
@@ -110,7 +115,26 @@ def _openai_settings(require_key: bool = True) -> Optional[Settings]:
                 "Set OPENAI_API_KEY (optional: OPENAI_BASE_URL)"
             )
         return None
-    return Settings(api_key=key, base_url=_openai_base_url())
+    return Settings(
+        api_key=key,
+        base_url=_openai_base_url(),
+        default_model=os.getenv("WRITING_MODEL") or os.getenv("ARK_MODEL", ""),
+    )
+
+
+@lru_cache
+def get_llm_control_service() -> LLMControlService:
+    return LLMControlService()
+
+
+@lru_cache
+def get_llm_provider_factory() -> LLMProviderFactory:
+    return LLMProviderFactory(get_llm_control_service())
+
+
+def llm_runtime_is_mock(llm_service: Optional[LLMService] = None) -> bool:
+    runtime = get_llm_control_service().get_runtime_summary()
+    return runtime.using_mock
 
 
 def get_storage() -> FileStorage:
@@ -215,14 +239,18 @@ def get_beat_sheet_repository():
     return SqliteBeatSheetRepository(get_database())
 
 
+@lru_cache(maxsize=None)
+def get_confluence_point_repository() -> SqliteConfluencePointRepository:
+    return SqliteConfluencePointRepository(get_database())
+
+
 def get_story_node_repository() -> StoryNodeRepository:
     """获取 StoryNode 仓储
 
     Returns:
-        StoryNodeRepository 实例
+        StoryNodeRepository 实例（复用 DatabaseConnection 线程本地连接）
     """
-    db_path = str(DATA_DIR / "aitext.db")
-    return StoryNodeRepository(db_path)
+    return StoryNodeRepository(get_database())
 
 
 # Service 依赖
@@ -239,6 +267,19 @@ def get_novel_service() -> NovelService:
     )
 
 
+def get_chapter_renumber_coordinator():
+    """删章后章号侧车数据（伏笔 JSON、快照内嵌 JSON、向量元数据）重排编排。"""
+    from application.novel.chapter_renumber.coordinator import (
+        build_default_chapter_renumber_coordinator,
+    )
+
+    return build_default_chapter_renumber_coordinator(
+        db=get_database(),
+        foreshadowing_repository=get_foreshadowing_repository(),
+        vector_store=get_vector_store(),
+    )
+
+
 def get_chapter_service() -> ChapterService:
     """获取 Chapter 服务
 
@@ -251,7 +292,8 @@ def get_chapter_service() -> ChapterService:
     return ChapterService(
         get_chapter_repository(), 
         get_novel_repository(),
-        review_repo
+        review_repo,
+        chapter_renumber_coordinator=get_chapter_renumber_coordinator(),
     )
 
 
@@ -264,39 +306,85 @@ def get_background_task_service():
     from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
     from infrastructure.persistence.database.connection import get_database
 
+    db = get_database()
     return BackgroundTaskService(
         voice_drift_service=get_voice_drift_service(),
         llm_service=get_llm_service(),
         foreshadowing_repo=get_foreshadowing_repository(),
-        triple_repository=TripleRepository(),
+        triple_repository=TripleRepository(db),
         knowledge_service=get_knowledge_service(),
         chapter_indexing_service=get_chapter_indexing_service(),
-        storyline_repository=SqliteStorylineRepository(get_database()),
+        storyline_repository=SqliteStorylineRepository(db),
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=get_plot_arc_repository(),
-        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
+        narrative_event_repository=SqliteNarrativeEventRepository(db),
     )
 
 
+@lru_cache
 def get_chapter_aftermath_pipeline():
-    """章节保存后统一管线：叙事/向量、文风、KG 推断；三元组与伏笔、故事线、张力、对话、剧情点在叙事同步中一次 LLM 落库。"""
+    """章节保存后统一管线（单例缓存，避免每次 PUT 请求重建 Pipeline + 8 个 Repository）。
+    
+    叙事/向量、文风、KG 推断；三元组与伏笔、故事线、张力、对话、剧情点、因果边、人物状态、债务在叙事同步中一次 LLM 落库。
+    """
     from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
     from infrastructure.persistence.database.triple_repository import TripleRepository
     from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
     from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+    from infrastructure.persistence.database.sqlite_causal_edge_repository import SqliteCausalEdgeRepository
+    from infrastructure.persistence.database.sqlite_character_state_repository import SqliteCharacterStateRepository
+    from infrastructure.persistence.database.sqlite_narrative_debt_repository import SqliteNarrativeDebtRepository
     from infrastructure.persistence.database.connection import get_database
+
+    db = get_database()
+
+    # ★ V8 Feed-forward: 因果边 / 人物状态 / 叙事债务 仓储
+    causal_edge_repo = None
+    character_state_repo = None
+    debt_repo = None
+    bible_repo = None
+
+    try:
+        causal_edge_repo = SqliteCausalEdgeRepository(db)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("CausalEdgeRepository 初始化失败: %s", e)
+
+    try:
+        character_state_repo = SqliteCharacterStateRepository(db)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("CharacterStateRepository 初始化失败: %s", e)
+
+    try:
+        debt_repo = SqliteNarrativeDebtRepository(db)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("NarrativeDebtRepository 初始化失败: %s", e)
+
+    try:
+        bible_repo = get_bible_repository()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("BibleRepository 初始化失败: %s", e)
 
     return ChapterAftermathPipeline(
         knowledge_service=get_knowledge_service(),
         chapter_indexing_service=get_chapter_indexing_service(),
         llm_service=get_llm_service(),
         voice_drift_service=get_voice_drift_service(),
-        triple_repository=TripleRepository(),
+        triple_repository=TripleRepository(db),
         foreshadowing_repository=get_foreshadowing_repository(),
-        storyline_repository=SqliteStorylineRepository(get_database()),
+        storyline_repository=SqliteStorylineRepository(db),
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=get_plot_arc_repository(),
-        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
+        narrative_event_repository=SqliteNarrativeEventRepository(db),
+        causal_edge_repository=causal_edge_repo,
+        character_state_repository=character_state_repo,
+        debt_repository=debt_repo,
+        bible_repository=bible_repo,
+        unified_checkpoint_service=get_unified_checkpoint_service(),
+        prop_lifecycle_syncer=_get_prop_lifecycle_syncer_safe(),
     )
 
 
@@ -310,22 +398,14 @@ def get_hosted_write_service() -> HostedWriteService:
     )
 
 
+@lru_cache
 def get_llm_service():
-    """获取 LLM 服务实例（根据 LLM_PROVIDER 决定使用 OpenAI 或 Anthropic，无配置用 Mock）。供多模块复用。"""
-    provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
-    
-    if provider == "openai":
-        settings = _openai_settings(require_key=False)
-        if settings:
-            from infrastructure.ai.providers.openai_provider import OpenAIProvider
-            return OpenAIProvider(settings)
-    else:
-        settings = _anthropic_settings(require_key=False)
-        if settings:
-            return AnthropicProvider(settings)
-            
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    return MockProvider()
+    """获取动态 LLM 服务实例。
+
+    返回长生命周期包装器：每次 generate/stream_generate 时重新读取当前激活配置，
+    因此前台控制面板修改后无需重启 API / 守护进程即可生效。
+    """
+    return DynamicLLMService(get_llm_provider_factory())
 
 
 def get_setup_main_plot_suggestion_service():
@@ -360,12 +440,9 @@ def get_bible_service() -> BibleService:
     )
 
 
+@lru_cache
 def get_cast_service() -> CastService:
-    """获取 Cast 服务
-
-    Returns:
-        CastService 实例
-    """
+    """获取 Cast 服务（进程内单例，供关系图 TTL 缓存复用）。"""
     storage = get_storage()
     storage_root = storage.base_path
     return CastService(storage_root, knowledge_repository=get_knowledge_repository())
@@ -399,37 +476,74 @@ def get_consistency_checker() -> ConsistencyChecker:
 
 
 def get_embedding_service():
-    """获取 Embedding 服务
+    """获取 Embedding 服务（优先从数据库读取配置，环境变量作为 fallback）。
 
-    根据环境变量选择服务类型：
-    - EMBEDDING_SERVICE=local: 使用本地模型（BAAI/bge-small-zh-v1.5）
-    - EMBEDDING_SERVICE=openai: 使用 OpenAI API（需要 OPENAI_API_KEY）
-    - 默认: local
+    配置优先级：
+    1. 数据库 embedding_config 表中的 mode / api_key / base_url / model / model_path / use_gpu
+    2. 环境变量 EMBEDDING_SERVICE / EMBEDDING_MODEL_PATH 等
+    3. 环境变量 EMBEDDING_MODEL / EMBEDDING_MODEL_PATH（无代码内写死的模型名）
 
     如果 VECTOR_STORE_ENABLED=false，返回 None。
     """
     if os.getenv("VECTOR_STORE_ENABLED", "true").lower() != "true":
         return None
 
-    service_type = os.getenv("EMBEDDING_SERVICE", "local").lower()
+    # 尝试从数据库读取配置
+    _mode = "local"
+    _api_key = ""
+    _base_url = ""
+    _model = ""
+    _model_path = ""
+    _use_gpu = True
 
     try:
-        if service_type == "local":
-            from infrastructure.ai.local_embedding_service import LocalEmbeddingService
-            model_path = os.getenv("EMBEDDING_MODEL_PATH", "BAAI/bge-small-zh-v1.5")
-            use_gpu = os.getenv("EMBEDDING_USE_GPU", "true").lower() == "true"
-            logger.info(f"Using local embedding service: {model_path}, GPU: {use_gpu}")
-            return LocalEmbeddingService(model_name=model_path, use_gpu=use_gpu)
-        elif service_type == "openai":
-            if not os.getenv("OPENAI_API_KEY"):
-                logger.warning("EMBEDDING_SERVICE=openai 但 OPENAI_API_KEY 未设置，向量检索已禁用")
+        from application.ai.embedding_config_service import get_embedding_config_service
+        cfg_svc = get_embedding_config_service()
+        cfg = cfg_svc.get_config()
+        _mode = cfg.mode
+        _api_key = cfg.api_key
+        _base_url = cfg.base_url
+        _model = (cfg.model or "").strip()
+        _model_path = (cfg.model_path or "").strip()
+        _use_gpu = cfg.use_gpu
+        logger.info(
+            "Embedding 配置来源: 数据库 | mode=%s, model=%s, path=%s",
+            _mode, _model, _model_path,
+        )
+    except Exception as exc:
+        # 数据库不可用时回退到环境变量
+        _mode = os.getenv("EMBEDDING_SERVICE", "local").lower()
+        _api_key = os.getenv("EMBEDDING_API_KEY") or ""
+        _base_url = os.getenv("EMBEDDING_BASE_URL") or ""
+        _model = (os.getenv("EMBEDDING_MODEL") or "").strip()
+        _model_path = (os.getenv("EMBEDDING_MODEL_PATH") or "").strip()
+        _use_gpu = os.getenv("EMBEDDING_USE_GPU", "true").lower() == "true"
+        logger.warning("读取嵌入配置失败，回退到环境变量: %s", exc)
+
+    try:
+        if _mode == "openai":
+            key = _api_key or os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+            if not key:
+                logger.warning("embedding mode=openai 但未配置 API Key，向量检索已禁用")
+                return None
+            if not (_model or "").strip():
+                logger.warning("embedding mode=openai 但未配置模型 ID（model / EMBEDDING_MODEL），向量检索已禁用")
                 return None
             from infrastructure.ai.openai_embedding_service import OpenAIEmbeddingService
-            logger.info("Using OpenAI embedding service")
-            return OpenAIEmbeddingService()
+            logger.info("使用 OpenAI 嵌入服务 (DB配置): base_url=%s, model=%s", _base_url, _model)
+            return OpenAIEmbeddingService(
+                api_key=key,
+                base_url=_base_url or None,
+                model=_model,
+            )
         else:
-            logger.warning(f"Unknown EMBEDDING_SERVICE: {service_type}, 向量检索已禁用")
-            return None
+            # 默认 local 模式
+            if not (_model_path or "").strip():
+                logger.warning("embedding mode=local 但未配置 model_path，向量检索已禁用")
+                return None
+            from infrastructure.ai.local_embedding_service import LocalEmbeddingService
+            logger.info("使用本地嵌入服务 (DB配置): path=%s, gpu=%s", _model_path, _use_gpu)
+            return LocalEmbeddingService(model_name=_model_path, use_gpu=_use_gpu)
     except Exception as e:
         logger.warning("EmbeddingService 初始化失败: %s", e)
         return None
@@ -458,46 +572,49 @@ def get_triple_indexing_service():
     return TripleIndexingService(vs, es)
 
 
-def get_vector_store() -> Optional[VectorStore]:
-    """获取向量存储
+_vector_store_singleton: Optional[VectorStore] = None
+_vector_store_init_failed: bool = False
 
-    根据环境变量返回 ChromaDB 或 Qdrant 实例。
+
+def get_vector_store() -> Optional[VectorStore]:
+    """获取向量存储（单例，整个进程共享同一实例）
+
+    使用本地 FAISS 向量存储（ChromaDBVectorStore），无需外部服务。
 
     环境变量配置：
-    - VECTOR_STORE_ENABLED: 是否启用向量存储（"true" 启用，默认 "true"）
-    - VECTOR_STORE_TYPE: 向量存储类型（"chromadb" 或 "qdrant"，默认 "chromadb"）
-    - VECTOR_STORE_PATH: ChromaDB 本地存储路径（默认 "./data/chromadb"）
-    - QDRANT_HOST: Qdrant 服务器地址（默认 "localhost"，仅 qdrant 类型）
-    - QDRANT_PORT: Qdrant 服务器端口（默认 6333，仅 qdrant 类型）
-    - QDRANT_API_KEY: Qdrant API 密钥（可选，仅 qdrant 类型）
+    - VECTOR_STORE_ENABLED: 是否启用（"true" 启用，默认 "true"）
+    - VECTOR_STORE_PATH: 本地存储路径（默认 "./data/chromadb"）
 
     Returns:
         VectorStore 实例或 None
     """
-    # 检查是否启用（默认启用）
-    enabled = os.getenv("VECTOR_STORE_ENABLED", "true").lower() == "true"
-    if not enabled:
+    global _vector_store_singleton, _vector_store_init_failed
+
+    # 如果已经初始化过（成功或失败），直接返回结果
+    if _vector_store_singleton is not None:
+        return _vector_store_singleton
+    if _vector_store_init_failed:
         return None
 
-    # 读取存储类型（默认 ChromaDB）
-    store_type = os.getenv("VECTOR_STORE_TYPE", "chromadb").lower()
+    enabled = os.getenv("VECTOR_STORE_ENABLED", "true").lower() == "true"
+    if not enabled:
+        _vector_store_init_failed = True
+        return None
 
     try:
-        if store_type == "chromadb":
-            from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
-            persist_dir = os.getenv("VECTOR_STORE_PATH", "./data/chromadb")
-            return ChromaDBVectorStore(persist_directory=persist_dir)
-        elif store_type == "qdrant":
-            from infrastructure.ai.qdrant_vector_store import QdrantVectorStore
-            host = os.getenv("QDRANT_HOST", "localhost")
-            port = int(os.getenv("QDRANT_PORT", "6333"))
-            api_key = os.getenv("QDRANT_API_KEY")
-            return QdrantVectorStore(host=host, port=port, api_key=api_key)
-        else:
-            logger.warning(f"Unknown VECTOR_STORE_TYPE: {store_type}, vector store disabled")
-            return None
+        from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
+        persist_dir = os.getenv("VECTOR_STORE_PATH", "./data/chromadb")
+        _vector_store_singleton = ChromaDBVectorStore(persist_directory=persist_dir)
+        logger.info("向量存储初始化成功: %s", persist_dir)
+        return _vector_store_singleton
     except Exception as e:
-        logger.warning(f"Failed to initialize vector store: {e}")
+        _vector_store_init_failed = True
+        logger.warning(
+            "向量存储初始化失败，已降级禁用。"
+            "如需使用向量功能，请安装依赖: pip install -r requirements-local.txt"
+            " 或设置 VECTOR_STORE_TYPE=qdrant。错误: %s",
+            e,
+        )
         return None
 
 
@@ -517,6 +634,31 @@ def get_context_builder() -> ContextBuilder:
     Returns:
         ContextBuilder 实例
     """
+    from infrastructure.persistence.database.triple_repository import TripleRepository
+    from infrastructure.persistence.database.sqlite_causal_edge_repository import SqliteCausalEdgeRepository
+    from infrastructure.persistence.database.sqlite_character_state_repository import SqliteCharacterStateRepository
+    from infrastructure.persistence.database.sqlite_narrative_debt_repository import SqliteNarrativeDebtRepository
+
+    db = get_database()
+
+    causal_edge_repo = None
+    try:
+        causal_edge_repo = SqliteCausalEdgeRepository(db)
+    except Exception as e:
+        logger.debug("CausalEdgeRepository 不可用（context_builder）: %s", e)
+
+    character_state_repo = None
+    try:
+        character_state_repo = SqliteCharacterStateRepository(db)
+    except Exception as e:
+        logger.debug("CharacterStateRepository 不可用（context_builder）: %s", e)
+
+    debt_repo = None
+    try:
+        debt_repo = SqliteNarrativeDebtRepository(db)
+    except Exception as e:
+        logger.debug("NarrativeDebtRepository 不可用（context_builder）: %s", e)
+
     return ContextBuilder(
         bible_service=get_bible_service(),
         storyline_manager=get_storyline_manager(),
@@ -527,7 +669,15 @@ def get_context_builder() -> ContextBuilder:
         plot_arc_repository=get_plot_arc_repository(),
         embedding_service=get_embedding_service(),
         foreshadowing_repository=get_foreshadowing_repository(),
+        story_node_repository=get_story_node_repository(),
+        bible_repository=get_bible_repository(),
         chapter_element_repository=get_chapter_element_repository(),
+        triple_repository=TripleRepository(),
+        causal_edge_repository=causal_edge_repo,
+        character_state_repository=character_state_repo,
+        narrative_debt_repository=debt_repo,
+        storyline_repository=get_storyline_manager().repository,
+        confluence_point_repository=get_confluence_point_repository(),
     )
 
 
@@ -559,8 +709,7 @@ def get_auto_workflow() -> AutoNovelGenerationWorkflow:
         AutoNovelGenerationWorkflow 实例
     """
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for workflow")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for workflow")
@@ -575,8 +724,7 @@ def get_auto_bible_generator() -> AutoBibleGenerator:
         AutoBibleGenerator 实例
     """
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for Bible generation")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for Bible generation")
@@ -645,8 +793,7 @@ def get_beat_sheet_service():
     from application.blueprint.services.beat_sheet_service import BeatSheetService
 
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for beat sheet generation")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for beat sheet generation")
@@ -670,8 +817,7 @@ def get_scene_generation_service():
     from application.core.services.scene_generation_service import SceneGenerationService
 
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for scene generation")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for scene generation")
@@ -693,8 +839,7 @@ def get_scene_director_service() -> "SceneDirectorService":
     from application.engine.services.scene_director_service import SceneDirectorService
 
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for scene director")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for scene director")
@@ -791,8 +936,7 @@ def get_macro_refactor_proposal_service():
     from application.audit.services.macro_refactor_proposal_service import MacroRefactorProposalService
 
     llm_service = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_service, MockProvider):
+    if llm_runtime_is_mock(llm_service):
         logger.warning("No API key found, using MockProvider for macro refactor proposals")
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for macro refactor proposals")
@@ -840,15 +984,19 @@ def get_tension_analyzer():
     from infrastructure.ai.llm_client import LLMClient
 
     llm_provider = get_llm_service()
-    from infrastructure.ai.providers.mock_provider import MockProvider
-    if isinstance(llm_provider, MockProvider):
+    if llm_runtime_is_mock(llm_provider):
         logger.warning("No API key found, using MockProvider for tension analyzer")
     else:
         logger.info(f"Using {llm_provider.__class__.__name__} for tension analyzer")
 
     llm_client = LLMClient(provider=llm_provider)
     narrative_event_repo = SqliteNarrativeEventRepository(get_database())
-    return TensionAnalyzer(narrative_event_repo, llm_client)
+    return TensionAnalyzer(
+        narrative_event_repo,
+        llm_client,
+        chapter_repository=get_chapter_repository(),
+        plot_arc_repository=get_plot_arc_repository(),
+    )
 
 
 def get_sandbox_dialogue_service():
@@ -905,4 +1053,101 @@ def get_foreshadow_ledger_service():
     """
     from application.analyst.services.foreshadow_ledger_service import ForeshadowLedgerService
     return ForeshadowLedgerService(get_foreshadowing_repository())
+
+
+def get_checkpoint_store():
+    """获取 Checkpoint 持久化存储（SQLite）
+
+    Returns:
+        CheckpointStore 实例
+    """
+    from engine.infrastructure.persistence.checkpoint_store import CheckpointStore
+    return CheckpointStore(get_database())
+
+
+def get_checkpoint_manager():
+    """获取 Checkpoint 管理器
+
+    Returns:
+        CheckpointManager 实例
+    """
+    from engine.runtime.checkpoint_manager.manager import CheckpointManager
+    return CheckpointManager(get_checkpoint_store())
+
+
+def get_quality_guardrail():
+    """获取质量护栏总控
+
+    Returns:
+        QualityGuardrail 实例
+    """
+    from engine.runtime.quality_guardrails.quality_guardrail import QualityGuardrail
+    return QualityGuardrail()
+
+
+def get_narrative_engine_read_facade():
+    """叙事引擎只读门面（小说家工作流聚合）。"""
+    from application.narrative_engine.read_facade import NarrativeEngineReadFacade
+
+    return NarrativeEngineReadFacade()
+
+
+def get_unified_checkpoint_service():
+    """统一 Checkpoint 服务（世界线管理）。"""
+    from application.checkpoint.services.unified_checkpoint_service import UnifiedCheckpointService
+
+    return UnifiedCheckpointService(
+        db=get_database(),
+        chapter_repository=get_chapter_repository(),
+        foreshadowing_repo=get_foreshadowing_repository(),
+    )
+
+
+def get_unified_prop_repository():
+    """统一道具仓储。"""
+    from infrastructure.persistence.database.unified_prop_repository import SqliteUnifiedPropRepository
+    return SqliteUnifiedPropRepository(get_database())
+
+
+def get_prop_event_repository():
+    """道具事件仓储。"""
+    from infrastructure.persistence.database.sqlite_prop_event_repository import SqlitePropEventRepository
+    return SqlitePropEventRepository(get_database())
+
+
+def _get_prop_lifecycle_syncer_safe():
+    """构建 PropLifecycleSyncer（失败时返回 None，不阻断启动）。"""
+    try:
+        return get_prop_lifecycle_syncer()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("PropLifecycleSyncer 初始化失败（非致命）: %s", e)
+        return None
+
+
+def get_prop_lifecycle_syncer():
+    """构建 PropLifecycleSyncer，注入 PatternExtractor + LlmExtractor + TripleHandler。"""
+    from application.prop.services.lifecycle_syncer import PropLifecycleSyncer
+    from application.prop.extractors.pattern_extractor import PatternExtractor
+    from application.prop.extractors.llm_extractor import LlmExtractor
+    from application.prop.handlers.triple_handler import TriplePropEventHandler
+
+    prop_repo = get_unified_prop_repository()
+    event_repo = get_prop_event_repository()
+    extractors = [PatternExtractor()]
+    try:
+        extractors.append(LlmExtractor(get_llm_service()))
+    except Exception:
+        pass
+    handlers = [TriplePropEventHandler(get_database())]
+    return PropLifecycleSyncer(prop_repo, event_repo, extractors, handlers)
+
+
+def get_unified_prop_context_builder():
+    """构建 PropContextBuilder，供 DAG ctx_prop_state 节点使用。"""
+    from application.prop.services.prop_context_builder import PropContextBuilder
+    return PropContextBuilder(
+        get_unified_prop_repository(),
+        get_prop_event_repository(),
+    )
 

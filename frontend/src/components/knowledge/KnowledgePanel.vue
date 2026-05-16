@@ -10,15 +10,6 @@
       </div>
       <n-space v-show="sideTab === 'narrative'" :size="8" align="center" style="flex-shrink:0">
         <n-button
-          size="small"
-          secondary
-          :loading="generating"
-          @click="generateKnowledge"
-          title="用 AI 根据 Bible 生成叙事知识（梗概锁定请在作品设定中编辑）"
-        >
-          ✦ AI 生成叙事
-        </n-button>
-        <n-button
           type="primary"
           size="small"
           :loading="saving"
@@ -26,6 +17,15 @@
           @click="save"
         >
           保存到全书上下文
+        </n-button>
+        <n-button
+          size="small"
+          quaternary
+          :loading="generating"
+          @click="generateKnowledge"
+          title="按需调用大模型；默认以 Bible / 章后管线为准，控成本请少用"
+        >
+          按需 AI 生成叙事
         </n-button>
       </n-space>
     </header>
@@ -210,6 +210,7 @@
         class="kp-subtabs"
       >
         <n-tab-pane name="chapters" tab="分章叙事">
+        <div class="kp-tab-scroll">
         <section class="kp-section">
         <div class="kp-section-head">
           <span class="kp-section-icon">◇</span>
@@ -310,9 +311,11 @@
 
         <n-button dashed block class="kp-add-ch" @click="addChapter">+ 添加一章叙事块</n-button>
         </section>
+        </div>
       </n-tab-pane>
 
       <n-tab-pane name="entity-state" tab="实体状态">
+        <div class="kp-tab-scroll">
         <section class="kp-section">
           <div class="kp-section-head">
             <span class="kp-section-icon">◈</span>
@@ -360,6 +363,7 @@
             </n-space>
           </n-card>
         </section>
+        </div>
       </n-tab-pane>
     </n-tabs>
     </div>
@@ -494,7 +498,6 @@ const inferAll = async () => {
   try {
     const res = await knowledgeGraphApi.inferNovel(props.slug)
     message.success('全书推断完成')
-    console.log('推断结果:', res.data)
     await loadTriples()
   } catch {
     message.error('推断失败')
@@ -590,7 +593,7 @@ const useHitToComposer = () => {
   if (!h) return
   const t = String(h.text || '').trim()
   if (!t) return
-  window.dispatchEvent(new CustomEvent('aitext:composer:insert', { detail: { text: t } }))
+  window.dispatchEvent(new CustomEvent('plotpilot:composer:insert', { detail: { text: t } }))
   message.success('已引用到输入框')
 }
 
@@ -692,7 +695,7 @@ const generateKnowledge = async () => {
 }
 
 const addChapter = () => {
-  const ids = data.value.chapters.map(c => c.chapter_id)
+  const ids = data.value.chapters.map(c => Number(c.chapter_id)).filter(n => Number.isFinite(n))
   const next = ids.length ? Math.max(...ids) + 1 : 1
   data.value.chapters.push({
     chapter_id: next,
@@ -716,7 +719,7 @@ const goCastChapter = (cid: number) => {
 const reloadKnowledge = () => {
   knowledgeLoading.value = true
   // 触发子组件重新加载
-  window.dispatchEvent(new CustomEvent('aitext:knowledge:reload'))
+  window.dispatchEvent(new CustomEvent('plotpilot:knowledge:reload'))
   setTimeout(() => {
     knowledgeLoading.value = false
   }, 500)
@@ -746,11 +749,11 @@ function onKnowledgeReloadFromOutside() {
 
 onMounted(() => {
   void load()
-  window.addEventListener('aitext:knowledge:reload', onKnowledgeReloadFromOutside)
+  window.addEventListener('plotpilot:knowledge:reload', onKnowledgeReloadFromOutside)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('aitext:knowledge:reload', onKnowledgeReloadFromOutside)
+  window.removeEventListener('plotpilot:knowledge:reload', onKnowledgeReloadFromOutside)
 })
 </script>
 
@@ -761,7 +764,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   padding: 12px 12px 8px;
-  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  background: linear-gradient(180deg, var(--app-surface-subtle) 0%, var(--app-border) 100%);
 }
 
 .kp-hero {
@@ -778,27 +781,27 @@ onUnmounted(() => {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.03em;
-  color: #0f172a;
+  color: var(--app-text-primary);
 }
 
 .kp-lead {
   margin: 0;
   font-size: 12px;
   line-height: 1.65;
-  color: #475569;
+  color: var(--app-text-muted);
   max-width: 520px;
 }
 
 .kp-lead strong {
-  color: #334155;
+  color: var(--app-text-secondary);
 }
 
 .kp-lead code {
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(79, 70, 229, 0.08);
-  color: #4338ca;
+  background: var(--color-brand-light);
+  color: var(--color-brand);
 }
 
 .kp-banner {
@@ -808,8 +811,8 @@ onUnmounted(() => {
   padding: 8px 10px;
   margin-bottom: 12px;
   border-radius: 10px;
-  background: rgba(79, 70, 229, 0.06);
-  border: 1px solid rgba(79, 70, 229, 0.12);
+  background: var(--color-brand-light);
+  border: 1px solid var(--color-brand-border);
   flex-shrink: 0;
 }
 
@@ -818,14 +821,14 @@ onUnmounted(() => {
   height: 6px;
   margin-top: 6px;
   border-radius: 50%;
-  background: #6366f1;
+  background: var(--color-brand);
   flex-shrink: 0;
 }
 
 .kp-banner-text {
   font-size: 11px;
   line-height: 1.55;
-  color: #475569;
+  color: var(--app-text-muted);
 }
 
 .kp-scroll {
@@ -837,14 +840,49 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   margin-top: 10px;
+  display: flex;
+  flex-direction: column;
 }
 
 .kp-subtabs :deep(.n-tabs-nav) {
   padding: 0 2px 6px;
+  flex-shrink: 0;
+}
+
+.kp-subtabs :deep(.n-tabs-pane-wrapper) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .kp-subtabs :deep(.n-tab-pane) {
   padding-top: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.kp-tab-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.kp-tab-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.kp-tab-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.kp-tab-scroll::-webkit-scrollbar-thumb {
+  background: var(--app-border);
+  border-radius: 2px;
 }
 
 .kp-section {
@@ -859,38 +897,38 @@ onUnmounted(() => {
 }
 
 .kp-section-icon {
-  color: #94a3b8;
+  color: var(--app-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
 .kp-section-title {
   font-size: 13px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--app-text-primary);
 }
 
 .kp-tag-tool {
   font-size: 10px !important;
   font-family: ui-monospace, monospace;
-  color: #6366f1 !important;
-  background: rgba(99, 102, 241, 0.12) !important;
+  color: var(--color-brand) !important;
+  background: var(--color-brand-light) !important;
 }
 
 .kp-section-hint {
   margin: 0 0 10px;
   font-size: 11px;
-  color: #64748b;
+  color: var(--app-text-muted);
   line-height: 1.5;
 }
 
 .kp-card {
   border-radius: 12px !important;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--app-shadow-sm);
 }
 
 .kp-card-premise {
-  background: #fff;
-  border: 1px solid rgba(15, 23, 42, 0.06) !important;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border) !important;
 }
 
 .kp-textarea :deep(textarea) {
@@ -905,15 +943,15 @@ onUnmounted(() => {
 }
 
 .kp-ch-card {
-  background: #fff;
-  border: 1px solid rgba(15, 23, 42, 0.07) !important;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border) !important;
   overflow: hidden;
 }
 
 .kp-ch-card :deep(.n-card-header) {
   padding: 10px 14px;
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.06), transparent);
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  background: linear-gradient(90deg, var(--color-brand-light), transparent);
+  border-bottom: 1px solid var(--app-divider);
 }
 
 .kp-ch-head {
@@ -934,12 +972,12 @@ onUnmounted(() => {
 .kp-ch-num {
   font-size: 13px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--app-text-primary);
 }
 
 .kp-ch-outline {
   font-size: 11px;
-  color: #64748b;
+  color: var(--app-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -962,7 +1000,7 @@ onUnmounted(() => {
   display: block;
   font-size: 11px;
   font-weight: 600;
-  color: #64748b;
+  color: var(--app-text-muted);
   margin-bottom: 6px;
   letter-spacing: 0.02em;
 }
@@ -989,7 +1027,7 @@ onUnmounted(() => {
   align-items: center;
   margin-top: 4px;
   padding-top: 8px;
-  border-top: 1px dashed rgba(15, 23, 42, 0.08);
+  border-top: 1px dashed var(--app-divider);
 }
 
 .kp-add-ch {
@@ -1013,7 +1051,8 @@ onUnmounted(() => {
   gap: 8px;
   padding: 5px 8px;
   border-radius: 8px;
-  background: rgba(15,23,42,0.03);
+  background: var(--app-surface-subtle);
+  border: 1px solid var(--app-divider);
   font-size: 12px;
 }
 .triple-body {
@@ -1062,8 +1101,8 @@ onUnmounted(() => {
 }
 
 .kp-search-card {
-  background: #fff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
   flex-shrink: 0;
 }
@@ -1073,8 +1112,8 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #fff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
   overflow: hidden;
 }
@@ -1084,15 +1123,15 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-  background: rgba(248, 250, 252, 0.6);
+  border-bottom: 1px solid var(--app-divider);
+  background: var(--app-surface-subtle);
   flex-shrink: 0;
 }
 
 .kp-edit-toolbar {
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-  background: #fafafa;
+  border-bottom: 1px solid var(--app-divider);
+  background: var(--app-surface-subtle);
   flex-shrink: 0;
 }
 
@@ -1136,20 +1175,20 @@ onUnmounted(() => {
 .kp-hit {
   padding: 10px 12px;
   border-radius: 8px;
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
+  background: var(--app-surface-subtle);
+  border: 1px solid var(--app-border);
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .kp-hit:hover {
-  background: #f3f4f6;
-  border-color: #d1d5db;
+  background: var(--app-surface);
+  border-color: var(--app-border-strong);
 }
 
 .kp-hit.active {
-  background: #eff6ff;
-  border-color: #3b82f6;
+  background: var(--color-brand-light);
+  border-color: var(--color-brand);
 }
 
 .kp-hit-meta {
@@ -1161,14 +1200,14 @@ onUnmounted(() => {
 
 .kp-hit-id {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--app-text-muted);
   font-family: monospace;
 }
 
 .kp-hit-text {
   font-size: 13px;
   line-height: 1.5;
-  color: #374151;
+  color: var(--app-text-secondary);
 }
 
 .kp-hit-text.kp-hit-collapsed {
@@ -1186,19 +1225,19 @@ onUnmounted(() => {
 }
 
 .kp-hit.collapsed:hover {
-  background: #f9fafb;
-  border-color: #e5e7eb;
+  background: var(--app-surface-subtle);
+  border-color: var(--app-border);
 }
 
 .kp-hit-ch {
   font-size: 10px;
-  color: #9ca3af;
+  color: var(--app-text-muted);
 }
 
 .kp-search-more {
   text-align: center;
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--app-text-muted);
   padding: 4px 0 0;
 }
 
@@ -1224,7 +1263,7 @@ onUnmounted(() => {
 
 .kp-graph-nav {
   padding: 12px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(248, 250, 252, 0.5);
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface-subtle);
 }
 </style>

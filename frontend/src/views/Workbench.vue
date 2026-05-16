@@ -1,6 +1,6 @@
 <template>
   <div class="workbench">
-    <StatsTopBar :slug="slug" />
+    <StatsTopBar :slug="slug" @open-settings="showLLMSettings = true" />
 
     <n-spin :show="pageLoading" class="workbench-spin" description="加载工作台…">
       <div class="workbench-inner">
@@ -29,7 +29,6 @@
                   :current-chapter-id="currentChapterId"
                   :chapter-content="chapterContent"
                   :chapter-loading="chapterLoading"
-                  @set-right-panel="setRightPanel"
                   @chapter-updated="handleChapterUpdated"
                 />
               </template>
@@ -38,7 +37,6 @@
                 <SettingsPanel
                   :slug="slug"
                   :current-panel="rightPanel"
-                  :bible-key="biblePanelKey"
                   :current-chapter="currentChapter"
                   @update:current-panel="onSettingsPanelChange"
                 />
@@ -56,11 +54,14 @@
       :act-title="actPlanningTitle"
       @confirmed="handleChapterUpdated"
     />
+
+    <!-- LLM Settings Modal -->
+    <LLMSettingsModal v-model:show="showLLMSettings" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
+import { onMounted, onUnmounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useWorkbench } from '../composables/useWorkbench'
@@ -71,13 +72,19 @@ import ChapterList from '../components/workbench/ChapterList.vue'
 import WorkArea from '../components/workbench/WorkArea.vue'
 import SettingsPanel from '../components/workbench/SettingsPanel.vue'
 import ActPlanningModal from '../components/workbench/ActPlanningModal.vue'
+import LLMSettingsModal from '../components/LLMSettingsModal.vue'
+import {
+  WORKBENCH_CHAPTER_DESK_CHANGE_EVENT,
+  WORKBENCH_OPEN_SETTINGS_PANEL_EVENT,
+  isWorkbenchSettingsPanelName,
+} from '../workbench/deskEvents'
 
 const route = useRoute()
 const message = useMessage()
 const statsStore = useStatsStore()
 const workbenchRefresh = useWorkbenchRefreshStore()
 
-const slug = route.params.slug as string
+const slug = computed(() => String(route.params.slug ?? ''))
 
 const chapterListRef = ref<ComponentPublicInstance<{ refreshStoryTree: () => void }> | null>(null)
 const workAreaRef = ref<ComponentPublicInstance<{ ensureAssistedMode: () => void }> | null>(null)
@@ -87,16 +94,40 @@ async function onSidebarChapterSelect(chapterId: number, title = '') {
   workAreaRef.value?.ensureAssistedMode?.()
 }
 
-const handleChapterUpdated = async () => {
+/** 合并短时间内的多次「整桌刷新」：全托管状态抖动 / 多源 emit 时只拉一次 API，减轻闪烁与日志刷屏 */
+let chapterDeskReloadTimer: ReturnType<typeof setTimeout> | null = null
+const CHAPTER_DESK_RELOAD_DEBOUNCE_MS = 1100
+
+async function runChapterDeskReload() {
   await loadDesk()
-  void statsStore.loadBookStats(slug, true).catch(() => {})
-  biblePanelKey.value += 1
+  void statsStore.loadBookStats(slug.value, true).catch(() => {})
+  window.dispatchEvent(new CustomEvent('plotpilot:bible-panel:soft-reload'))
   chapterListRef.value?.refreshStoryTree?.()
   workbenchRefresh.bumpAfterChapterDeskChange()
 }
 
+const handleChapterUpdated = () => {
+  if (chapterDeskReloadTimer) clearTimeout(chapterDeskReloadTimer)
+  chapterDeskReloadTimer = setTimeout(() => {
+    chapterDeskReloadTimer = null
+    void runChapterDeskReload()
+  }, CHAPTER_DESK_RELOAD_DEBOUNCE_MS)
+}
+
+function onDeskChangeSignalFromPanels() {
+  handleChapterUpdated()
+}
+
+function onOpenSettingsPanelFromChild(e: Event) {
+  const panel = (e as CustomEvent<{ panel?: string }>).detail?.panel
+  if (typeof panel === 'string' && isWorkbenchSettingsPanelName(panel)) {
+    rightPanel.value = panel
+  }
+}
+
 // 幕→章 规划弹层
 const showActPlanning = ref(false)
+const showLLMSettings = ref(false)
 const actPlanningId = ref('')
 const actPlanningTitle = ref('')
 
@@ -110,7 +141,6 @@ const {
   bookTitle,
   chapters,
   rightPanel,
-  biblePanelKey,
   pageLoading,
   bookMeta,
   currentJobId,
@@ -119,6 +149,7 @@ const {
   chapterLoading,
   setRightPanel,
   loadDesk,
+  reloadDeskForSlugChange,
   goHome,
   goToChapter,
   handleChapterSelect,
@@ -148,14 +179,25 @@ async function syncChapterFromRoute() {
 }
 
 onMounted(async () => {
+  window.addEventListener(WORKBENCH_CHAPTER_DESK_CHANGE_EVENT, onDeskChangeSignalFromPanels)
+  window.addEventListener(WORKBENCH_OPEN_SETTINGS_PANEL_EVENT, onOpenSettingsPanelFromChild)
   try {
     await loadDesk()
     await syncChapterFromRoute()
   } catch {
     message.error('加载失败，请检查网络与后端是否已启动')
-    bookTitle.value = slug
+    bookTitle.value = slug.value
   } finally {
     pageLoading.value = false
+  }
+})
+
+onUnmounted(() => {
+  window.removeEventListener(WORKBENCH_CHAPTER_DESK_CHANGE_EVENT, onDeskChangeSignalFromPanels)
+  window.removeEventListener(WORKBENCH_OPEN_SETTINGS_PANEL_EVENT, onOpenSettingsPanelFromChild)
+  if (chapterDeskReloadTimer) {
+    clearTimeout(chapterDeskReloadTimer)
+    chapterDeskReloadTimer = null
   }
 })
 
@@ -165,12 +207,31 @@ watch(
     void syncChapterFromRoute()
   }
 )
+
+watch(
+  slug,
+  async (next, prev) => {
+    if (!next || prev === next) return
+    try {
+      await reloadDeskForSlugChange()
+      await syncChapterFromRoute()
+      void statsStore.loadBookStats(next, true).catch(() => {})
+      chapterListRef.value?.refreshStoryTree?.()
+      workbenchRefresh.bumpAfterChapterDeskChange()
+    } catch {
+      message.error('切换作品失败，请检查网络与后端是否已启动')
+      bookTitle.value = next
+    }
+  }
+)
 </script>
 
 <style scoped>
 .workbench {
   height: 100vh;
   min-height: 0;
+  max-height: 100vh;
+  overflow: hidden;
   background: var(--app-page-bg, #f0f2f8);
   display: flex;
   flex-direction: column;
@@ -179,23 +240,36 @@ watch(
 .workbench-spin {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .workbench-spin :deep(.n-spin-content) {
-  min-height: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .workbench-inner {
-  height: 100%;
+  flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .workbench-inner :deep(.n-split) {
+  flex: 1;
+  min-height: 0;
   height: 100%;
 }
 
-.workbench-inner :deep(.n-split-pane-1) {
+.workbench-inner :deep(.n-split-pane-1),
+.workbench-inner :deep(.n-split-pane-2) {
   min-height: 0;
   overflow: hidden;
 }

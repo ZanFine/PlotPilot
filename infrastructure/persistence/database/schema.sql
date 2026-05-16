@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS novels (
     last_chapter_tension INTEGER DEFAULT 0,
     consecutive_error_count INTEGER DEFAULT 0,
     current_beat_index INTEGER DEFAULT 0,
+    beats_completed INTEGER DEFAULT 0,
     last_audit_chapter_number INTEGER,
     last_audit_similarity REAL,
     last_audit_drift_alert INTEGER DEFAULT 0,
@@ -40,6 +41,18 @@ CREATE TABLE IF NOT EXISTS chapters (
     FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
     UNIQUE(novel_id, number)
 );
+
+-- 章节节拍表（场景列表 JSON，与 SqliteBeatSheetRepository 一致）
+CREATE TABLE IF NOT EXISTS beat_sheets (
+    id TEXT PRIMARY KEY,
+    chapter_id TEXT NOT NULL UNIQUE,
+    data TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_beat_sheets_chapter_id ON beat_sheets(chapter_id);
 
 -- 三元组主行（无 JSON 列）
 CREATE TABLE IF NOT EXISTS triples (
@@ -501,6 +514,13 @@ CREATE TABLE IF NOT EXISTS novel_snapshots (
     bible_state TEXT,  -- JSON: Bible 快照
     foreshadow_state TEXT,  -- JSON: 伏笔账本快照
     graph_state TEXT,  -- JSON: 知识图谱快照（可选）
+    -- 引擎状态字段（统一 Checkpoint+Snapshot 系统）
+    story_state TEXT DEFAULT '{}',  -- JSON: 故事状态
+    character_masks TEXT DEFAULT '{}',  -- JSON: 角色面具
+    emotion_ledger TEXT DEFAULT '{}',  -- JSON: 情绪账本
+    active_foreshadows TEXT DEFAULT '[]',  -- JSON: 活跃伏笔
+    outline TEXT DEFAULT '',  -- TEXT: 当前大纲
+    recent_chapters_summary TEXT DEFAULT '',  -- TEXT: 近期章节摘要
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
     FOREIGN KEY (parent_snapshot_id) REFERENCES novel_snapshots(id) ON DELETE SET NULL
@@ -508,4 +528,218 @@ CREATE TABLE IF NOT EXISTS novel_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_novel_snapshots_novel ON novel_snapshots(novel_id);
 CREATE INDEX IF NOT EXISTS idx_novel_snapshots_branch ON novel_snapshots(novel_id, branch_name);
+
+
+-- ========== 提示词广场系统（Prompt Plaza）==========
+-- 模板包：一组相关提示词的集合（如"内置"、"自定义工作流"）
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'user',  -- builtin / user / workflow
+    version TEXT NOT NULL DEFAULT '1.0.0',
+    author TEXT DEFAULT '',
+    icon TEXT DEFAULT '📦',
+    color TEXT DEFAULT '#6b7280',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 提示词节点：单个提示词（有版本历史）
+CREATE TABLE IF NOT EXISTS prompt_nodes (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL,
+    node_key TEXT NOT NULL,           -- 唯一标识，如 "chapter-generation-main"
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'generation',  -- generation/extraction/review/planning/world/creative
+    source TEXT DEFAULT '',            -- 来源代码位置
+    output_format TEXT DEFAULT 'text',  -- text / json
+    contract_module TEXT,              -- Pydantic 合约模块
+    contract_model TEXT,               -- Pydantic 合约模型名
+    tags TEXT NOT NULL DEFAULT '[]',   -- JSON 数组
+    variables TEXT NOT NULL DEFAULT '[]',  -- JSON: 变量定义列表
+    system_file TEXT,                  -- 预留，可为空（正文在 prompt_versions.system_prompt）
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active_version_id TEXT,            -- 当前激活版本 ID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (template_id) REFERENCES prompt_templates(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_prompt_nodes_node_key ON prompt_nodes(node_key);
+CREATE INDEX IF NOT EXISTS idx_prompt_nodes_template ON prompt_nodes(template_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_nodes_category ON prompt_nodes(category);
+
+-- 提示词版本：每个节点的版本历史（支持回滚）
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    system_prompt TEXT NOT NULL DEFAULT '',     -- System 角色提示词
+    user_template TEXT NOT NULL DEFAULT '',      -- User 模板
+    change_summary TEXT DEFAULT '',             -- 版本变更说明
+    created_by TEXT DEFAULT 'system',           -- system / user
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (node_id) REFERENCES prompt_nodes(id) ON DELETE CASCADE,
+    UNIQUE(node_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_node ON prompt_versions(node_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_node_ver ON prompt_versions(node_id, version_number DESC);
+
+-- ========== CPMS: 提示词工作流定义 ==========
+CREATE TABLE IF NOT EXISTS prompt_workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== CPMS: 提示词工作流绑定 ==========
+CREATE TABLE IF NOT EXISTS prompt_bindings (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    node_key TEXT NOT NULL,
+    slot TEXT NOT NULL DEFAULT 'system_main',
+    priority INTEGER NOT NULL DEFAULT 50,
+    is_required INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES prompt_workflows(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_bindings_workflow ON prompt_bindings(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_bindings_node ON prompt_bindings(node_key);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_prompt_bindings_wf_node_slot
+    ON prompt_bindings(workflow_id, node_key, slot);
+
+-- ========== CPMS: 全局变量注册表 ==========
+CREATE TABLE IF NOT EXISTS variable_registry (
+    name TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'string',
+    scope TEXT NOT NULL DEFAULT 'chapter',
+    is_required INTEGER NOT NULL DEFAULT 0,
+    default_value TEXT,
+    description TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    enum_values TEXT DEFAULT '[]',
+    examples TEXT DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_variable_registry_scope ON variable_registry(scope);
+CREATE INDEX IF NOT EXISTS idx_variable_registry_type ON variable_registry(type);
+
+-- ========== CPMS: 提示词调试日志 ==========
+CREATE TABLE IF NOT EXISTS prompt_debug_logs (
+    id TEXT PRIMARY KEY,
+    node_key TEXT NOT NULL,
+    workflow_id TEXT,
+    variables_json TEXT DEFAULT '{}',
+    rendered_system TEXT DEFAULT '',
+    rendered_user TEXT DEFAULT '',
+    llm_response TEXT DEFAULT '',
+    cot_trace TEXT DEFAULT '',
+    token_usage TEXT DEFAULT '{}',
+    duration_ms INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    error_message TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_debug_node ON prompt_debug_logs(node_key);
+CREATE INDEX IF NOT EXISTS idx_prompt_debug_workflow ON prompt_debug_logs(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_debug_status ON prompt_debug_logs(status);
+CREATE INDEX IF NOT EXISTS idx_prompt_debug_created ON prompt_debug_logs(created_at DESC);
+
+
+-- ========== 嵌入模型配置（Embedding Config）==========
+-- 全局唯一的嵌入服务配置（本地模型 / OpenAI 云端）
+CREATE TABLE IF NOT EXISTS embedding_config (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    mode TEXT NOT NULL DEFAULT 'local' CHECK(mode IN ('local', 'openai')),
+    api_key TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-small',
+    use_gpu INTEGER NOT NULL DEFAULT 1,
+    model_path TEXT NOT NULL DEFAULT 'BAAI/bge-small-zh-v1.5',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- ========== LLM 控制面板配置（LLM Profiles）==========
+-- 替代原 llm_profiles.json 本地文件存储，持久化到 SQLite。
+-- active_profile_id 存储在 llm_config_meta 行中。
+
+CREATE TABLE IF NOT EXISTS llm_config_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS llm_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    preset_key TEXT NOT NULL DEFAULT 'custom-openai-compatible',
+    protocol TEXT NOT NULL DEFAULT 'openai' CHECK(protocol IN ('openai', 'anthropic', 'gemini')),
+    base_url TEXT NOT NULL DEFAULT '',
+    api_key TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    temperature REAL NOT NULL DEFAULT 0.7,
+    max_tokens INTEGER NOT NULL DEFAULT 4096,
+    timeout_seconds INTEGER NOT NULL DEFAULT 300,
+    extra_headers TEXT NOT NULL DEFAULT '{}',
+    extra_query TEXT NOT NULL DEFAULT '{}',
+    extra_body TEXT NOT NULL DEFAULT '{}',
+    notes TEXT NOT NULL DEFAULT '',
+    use_legacy_chat_completions INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_profiles_sort ON llm_profiles(sort_order);
+
+
+-- ========== DAG 版本管理（替代文件系统存储）==========
+-- DAG 版本历史表：存储 DAG 定义的完整版本历史
+CREATE TABLE IF NOT EXISTS dag_versions (
+    id TEXT PRIMARY KEY,  -- UUID
+    novel_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    dag_id TEXT NOT NULL,  -- dag_novel_xxx
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+
+    -- DAG 结构数据（JSON 字符串）
+    nodes_json TEXT NOT NULL,  -- JSON array of NodeDefinition
+    edges_json TEXT NOT NULL,  -- JSON array of EdgeDefinition
+
+    -- 元数据
+    fingerprint TEXT NOT NULL,  -- SHA256 hash (16 chars)
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+    UNIQUE(novel_id, version)  -- 确保同一 novel 下版本号唯一
+);
+
+-- 索引：按 novel_id 查询版本列表
+CREATE INDEX IF NOT EXISTS idx_dag_versions_novel ON dag_versions(novel_id);
+-- 索引：按 novel_id + version 查询特定版本
+CREATE INDEX IF NOT EXISTS idx_dag_versions_novel_version ON dag_versions(novel_id, version);
+-- 索引：按更新时间排序（用于清理旧版本）
+CREATE INDEX IF NOT EXISTS idx_dag_versions_updated_at ON dag_versions(novel_id, updated_at DESC);
+
+
 

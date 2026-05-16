@@ -2,16 +2,26 @@
   "name": "plotpilot",
   "private": true,
   "description": "PlotPilot · 墨枢 - 作者的领航员",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
+    "sync:taxonomy": "node scripts/sync-builtin-taxonomy.mjs",
+    "predev": "npm run sync:taxonomy",
+    "prebuild": "npm run sync:taxonomy",
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@types/dompurify": "^3.0.5",
     "@vicons/ionicons5": "^0.13.0",
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "@vue-flow/minimap": "^1.5.4",
     "@vueuse/core": "^14.2.1",
     "axios": "^1.14.0",
     "dayjs": "^1.11.20",
@@ -26,11 +36,14 @@
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/cli": "^2",
     "@types/node": "^24.12.0",
     "@vitejs/plugin-vue": "^6.0.5",
     "@vue/tsconfig": "^0.9.0",
     "typescript": "~5.9.3",
     "vite": "^8.0.1",
-    "vue-tsc": "^3.2.5"
+    "vue-tsc": "^3.2.5",
+    "yaml": "^2.9.0"
   }
 }

@@ -123,6 +123,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { resolveHttpUrl } from '@/api/config'
 
 interface ErrorRecord {
   message: string
@@ -140,6 +141,7 @@ interface CircuitBreakerData {
 
 const props = defineProps<{
   novelId: string
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const emit = defineEmits<{
@@ -230,7 +232,9 @@ const statusSubtext = computed(() => {
 async function loadBreakerData() {
   loading.value = true
   try {
-    const res = await fetch(`/api/v1/autopilot/${props.novelId}/circuit-breaker`)
+    const res = await fetch(
+      resolveHttpUrl(`/api/v1/autopilot/${props.novelId}/circuit-breaker`),
+    )
     if (res.status === 404) {
       stopPolling()
       pollStopped404 = true
@@ -256,9 +260,10 @@ async function loadBreakerData() {
 // 重置熔断器
 async function handleReset() {
   try {
-    const res = await fetch(`/api/v1/autopilot/${props.novelId}/circuit-breaker/reset`, {
-      method: 'POST'
-    })
+    const res = await fetch(
+      resolveHttpUrl(`/api/v1/autopilot/${props.novelId}/circuit-breaker/reset`),
+      { method: 'POST' },
+    )
     if (res.ok) {
       await loadBreakerData()
       emit('breaker-reset')
@@ -314,6 +319,11 @@ function stopPolling() {
 // 监听
 watch(() => props.novelId, () => {
   void startPolling()
+})
+
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadBreakerData()
 })
 
 // 生命周期

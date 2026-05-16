@@ -9,6 +9,10 @@ from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.shared.exceptions import EntityNotFoundError
 from application.core.dtos.novel_dto import NovelDTO
+from application.core.v1_length_tiers import (
+    build_v1_structure_black_box_hint,
+    resolve_v1_length_params,
+)
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 
@@ -36,6 +40,18 @@ class NovelService:
         self.chapter_repository = chapter_repository
         self.story_node_repository = story_node_repository
 
+    def _hydrate_chapters(self, novel: Novel) -> Novel:
+        """用 Chapter 仓储补齐 DTO 所需章节列表。"""
+        if self.chapter_repository is None:
+            return novel
+        try:
+            chapters = self.chapter_repository.list_by_novel(novel.novel_id)
+            if isinstance(chapters, list):
+                novel.chapters = chapters
+        except Exception:
+            pass
+        return novel
+
     def ensure_default_act_for_chapters(self, novel_id: str) -> None:
         """若无任何「幕」节点，创建默认第一幕，以便 add_chapter 能挂接章节到叙事结构树。"""
         if not self.story_node_repository:
@@ -60,13 +76,36 @@ class NovelService:
         )
         self.story_node_repository.save_sync(act_node)
 
+    @staticmethod
+    def _compose_premise_with_presets(
+        premise: str,
+        genre: str = "",
+        world_preset: str = "",
+    ) -> str:
+        """将赛道/世界观预设与梗概合并，供后续 Bible/全托管链路统一消费（无需额外表字段）。"""
+        parts = []
+        g = (genre or "").strip()
+        w = (world_preset or "").strip()
+        if g:
+            parts.append(f"类型：{g}")
+        if w:
+            parts.append(f"世界观基调：{w}")
+        body = (premise or "").strip()
+        if not parts:
+            return body
+        return "【" + "；".join(parts) + "】\n\n" + body
+
     def create_novel(
         self,
         novel_id: str,
         title: str,
         author: str,
         target_chapters: int,
-        premise: str = ""
+        premise: str = "",
+        genre: str = "",
+        world_preset: str = "",
+        length_tier: Optional[str] = None,
+        target_words_per_chapter: Optional[int] = None,
     ) -> NovelDTO:
         """创建新小说
 
@@ -74,19 +113,30 @@ class NovelService:
             novel_id: 小说 ID
             title: 标题
             author: 作者
-            target_chapters: 目标章节数
+            target_chapters: 目标章节数（未使用 V1 体量档时有效）
             premise: 故事梗概/创意
+            genre: 赛道/类型（前端下拉预设，写入 premise 前缀）
+            world_preset: 世界观基调（前端下拉预设，写入 premise 前缀）
+            length_tier: V1 体量档 short|standard|epic；若指定则由服务端推导章数与每章字数
+            target_words_per_chapter: 每章目标字数（可选；与体量档或自定义章数搭配）
 
         Returns:
             NovelDTO
         """
+        chapters, wpc, tier_norm = resolve_v1_length_params(
+            length_tier, target_chapters, target_words_per_chapter
+        )
+        structure_hint = build_v1_structure_black_box_hint(tier_norm, chapters, wpc)
+        user_block = self._compose_premise_with_presets(premise, genre, world_preset)
+        full_premise = f"{structure_hint}\n\n{user_block}"
         novel = Novel(
             id=NovelId(novel_id),
             title=title,
             author=author,
-            target_chapters=target_chapters,
-            premise=premise,
-            stage=NovelStage.PLANNING
+            target_chapters=chapters,
+            premise=full_premise,
+            stage=NovelStage.PLANNING,
+            target_words_per_chapter=wpc,
         )
 
         self.novel_repository.save(novel)
@@ -99,7 +149,7 @@ class NovelService:
         if novel is None:
             return None
 
-        dto = NovelDTO.from_domain(novel)
+        dto = NovelDTO.from_domain(self._hydrate_chapters(novel))
 
         dto.has_bible = self._check_has_bible(novel_id)
         dto.has_outline = self._check_has_outline(novel_id)
@@ -107,6 +157,13 @@ class NovelService:
         return dto
 
     def _check_has_bible(self, novel_id: str) -> bool:
+        storage = getattr(self.novel_repository, "storage", None)
+        if storage is not None and hasattr(storage, "exists"):
+            try:
+                return bool(storage.exists(f"novels/{novel_id}/bible.json"))
+            except Exception:
+                pass
+
         try:
             from infrastructure.persistence.database.sqlite_bible_repository import SqliteBibleRepository
             from infrastructure.persistence.database.connection import get_database
@@ -133,7 +190,13 @@ class NovelService:
             NovelDTO 列表
         """
         novels = self.novel_repository.list_all()
-        return [NovelDTO.from_domain(novel) for novel in novels]
+        dtos = []
+        for novel in novels:
+            dto = NovelDTO.from_domain(self._hydrate_chapters(novel))
+            dto.has_bible = self._check_has_bible(novel.novel_id.value)
+            dto.has_outline = self._check_has_outline(novel.novel_id.value)
+            dtos.append(dto)
+        return dtos
 
     def delete_novel(self, novel_id: str) -> None:
         """删除小说
@@ -173,6 +236,8 @@ class NovelService:
 
         # 查询数据库中实际的章节数
         existing_chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
+        if not isinstance(existing_chapters, list):
+            existing_chapters = list(getattr(novel, "chapters", []) or [])
         expected_number = len(existing_chapters) + 1
 
         # 验证章节号是否连续
@@ -189,6 +254,9 @@ class NovelService:
 
         # 直接保存章节，不通过Novel实体
         self.chapter_repository.save(chapter)
+        if not any(getattr(c, "number", None) == chapter.number for c in novel.chapters):
+            novel.chapters.append(chapter)
+        self.novel_repository.save(novel)
 
         # 同步创建 StoryNode 章节节点，并关联到当前活跃的幕
         if self.story_node_repository:
@@ -237,11 +305,18 @@ class NovelService:
                 logger.warning(f"Failed to sync chapter to story structure: {e}")
 
         # 重新加载Novel以返回最新状态
-        novel = self.novel_repository.get_by_id(NovelId(novel_id))
-        return NovelDTO.from_domain(novel)
+        novel = self.novel_repository.get_by_id(NovelId(novel_id)) or novel
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
-    def update_novel(self, novel_id: str, title: Optional[str] = None, author: Optional[str] = None, 
-                     target_chapters: Optional[int] = None, premise: Optional[str] = None) -> NovelDTO:
+    def update_novel(
+        self,
+        novel_id: str,
+        title: Optional[str] = None,
+        author: Optional[str] = None,
+        target_chapters: Optional[int] = None,
+        premise: Optional[str] = None,
+        target_words_per_chapter: Optional[int] = None,
+    ) -> NovelDTO:
         """更新小说基本信息
 
         Args:
@@ -250,6 +325,7 @@ class NovelService:
             author: 作者（可选）
             target_chapters: 目标章节数（可选）
             premise: 故事梗概/创意（可选）
+            target_words_per_chapter: 每章目标字数（可选，500–10000）
 
         Returns:
             更新后的 NovelDTO
@@ -270,9 +346,12 @@ class NovelService:
             novel.target_chapters = target_chapters
         if premise is not None:
             novel.premise = premise
+        if target_words_per_chapter is not None:
+            tw = int(target_words_per_chapter)
+            novel.target_words_per_chapter = max(500, min(10000, tw))
 
         self.novel_repository.save(novel)
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_novel_stage(self, novel_id: str, stage: str) -> NovelDTO:
         """更新小说阶段
@@ -294,7 +373,7 @@ class NovelService:
         novel.stage = NovelStage(stage)
         self.novel_repository.save(novel)
 
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_auto_approve_mode(self, novel_id: str, auto_approve_mode: bool) -> NovelDTO:
         """更新全自动模式设置
@@ -316,7 +395,7 @@ class NovelService:
         novel.auto_approve_mode = auto_approve_mode
         self.novel_repository.save(novel)
 
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def get_novel_statistics(self, novel_id: str) -> Dict[str, Any]:
         """获取小说统计信息（以 Chapter 仓储落盘为准，与列表/读写 API 一致）
